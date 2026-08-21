@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+
+  "compilerOptions": {
+    "target": "ES2024",
+    "lib": ["ES2024"],
+    "module": "nodenext",
+    "moduleResolution": "nodenext",
+    "types": ["node"],
+
+    // Every one of these has caught a real bug somewhere. `strict` alone is the
+    // floor, not the ceiling.
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "noImplicitOverride": true,
+    "noImplicitReturns": true,
+    "noFallthroughCasesInSwitch": true,
+    "noPropertyAccessFromIndexSignature": true,
+    "noUnusedLocals": true,
+    "noUnusedParameters": true,
+
+    // Types are erasable and nothing else. No enums, no namespaces, no
+    // parameter properties — so `node --experimental-strip-types` and every
+    // esbuild-shaped tool see the same program tsc does.
+    "isolatedModules": true,
+    "verbatimModuleSyntax": true,
+    "erasableSyntaxOnly": true,
+
+    "resolveJsonModule": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+
+    // Typechecking only. Emit is tsconfig.build.json's job.
+    "noEmit": true,
+    "sourceMap": true
+  },
+
+  "include": ["src", "tests", "vitest.config.ts", "eslint.config.ts"],
+
+  // These trees import modules that do not exist and violate the architecture
+  // on purpose. tests/rules/arch.test.ts cruises them; tsc must not.
+  "exclude": ["tests/rules/fixtures"]
+}

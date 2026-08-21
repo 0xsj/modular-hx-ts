@@ -1,0 +1,13 @@
+# pnpm's own settings live here in pnpm 11. There is no workspace — this is one
+# package — but this is the file pnpm reads.
+
+# Postinstall scripts do not run unless a dependency is named here. A package
+# that wants to execute code at install time should have to ask.
+allowBuilds:
+  esbuild: true # vitest's transform pipeline; links its prebuilt binary
+
+# pnpm refuses versions published in the last few days, so a compromised release
+# has time to be yanked before it lands here. Anything below is a deliberate
+# exception: pinned on purpose, newer than the gate.
+minimumReleaseAgeExclude:
+  - eslint@10.9.0

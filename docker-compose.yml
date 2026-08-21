@@ -1,0 +1,85 @@
+# The local stack for rungs 1-3 of the verification ladder.
+#
+# Rung 0 does not appear here and never will: `make dev` and `make test` run the
+# whole application with zero external dependencies. If a change makes them need
+# this file, the change is wrong. See ../INFRASTRUCTURE.md §1.
+#
+# Postgres alone, because Postgres is the only service a phase-1 module has a
+# contract suite to run against. Mailpit arrives with `mailer`; Jaeger and
+# Prometheus arrive with `telemetry`. A service nothing tests against is dead
+# weight (../INFRASTRUCTURE.md §3 rule 7).
+
+name: modular-hx-ts
+
+services:
+  postgres:
+    # Pinned by tag. A blueprint that breaks because upstream moved is not a
+    # blueprint (../INFRASTRUCTURE.md §3 rule 1).
+    image: postgres:18-alpine
+    restart: unless-stopped
+
+    environment:
+      POSTGRES_USER: ${PG_USER:-app}
+      POSTGRES_PASSWORD: ${PG_PASSWORD:-app}
+      POSTGRES_DB: ${PG_DB:-app}
+      # Deterministic collation, so ORDER BY means the same thing here, in CI,
+      # and on every contributor's machine. Keyset pagination depends on it.
+      POSTGRES_INITDB_ARGS: '--encoding=UTF8 --locale=C'
+
+    ports:
+      # ../PORTS.md is the authority. This repo's base is 15420; Postgres is
+      # offset +0. The container side is never namespaced.
+      # Override with PG_PORT=25420 make db-up.
+      - '${PG_PORT:-15420}:5432'
+
+    volumes:
+      # Mounted at /var/lib/postgresql, NOT /var/lib/postgresql/data. Postgres
+      # 18 changed the convention: data now lives in a major-version-named
+      # subdirectory below the mount, so `pg_upgrade --link` does not have to
+      # cross a mount boundary. Mounting the old path leaves the server looking
+      # at an "unused mount/volume" and failing its health check.
+      #
+      # Named, and destroyed by exactly one target: `make db-reset`.
+      # Never a hidden -v (../INFRASTRUCTURE.md §3 rule 4).
+      - pgdata:/var/lib/postgresql
+
+    # `docker compose up --wait` blocks on this. A test that starts before
+    # Postgres is ready fails for the wrong reason and teaches the wrong lesson
+    # (../INFRASTRUCTURE.md §3 rule 2).
+    #
+    # -h 127.0.0.1 on purpose: during init Postgres accepts local socket
+    # connections while still refusing TCP, so a socket probe reports ready
+    # before the port a test connects on actually is.
+    healthcheck:
+      test:
+        [
+          'CMD-SHELL',
+          'pg_isready -h 127.0.0.1 -U ${PG_USER:-app} -d ${PG_DB:-app}',
+        ]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+    command:
+      # Contract suites run schema-per-test in parallel; the default 100 is
+      # tight once several suites share one server.
+      - '-c'
+      - 'max_connections=200'
+      # Rung 2 is a disposable database, not a durable one. Trading crash
+      # safety for speed here is deliberate and stays out of `deploy/`.
+      - '-c'
+      - 'fsync=off'
+      - '-c'
+      - 'synchronous_commit=off'
+      - '-c'
+      - 'full_page_writes=off'
+      # Every statement in the log, so a failing suite can be read back.
+      - '-c'
+      - 'log_statement=all'
+      - '-c'
+      - 'log_connections=on'
+
+volumes:
+  pgdata:
+    name: modular-hx-ts_pgdata

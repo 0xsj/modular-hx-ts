@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+.pnpm-store/
+
+# Build output
+dist/
+build/
+coverage/
+*.tsbuildinfo
+.turbo/
+.vite/
+
+# Environment — .env.example is committed, .env never is
+.env
+.env.local
+.env.*.local
+
+# Local state
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+
+# Editors and local tooling
+.idea/
+.vscode/
+.eslintcache
+
+# Local working files — not part of the published blueprint
+CLAUDE.md
+STATUS.md
+.claude/
+drafts/
+scratch/

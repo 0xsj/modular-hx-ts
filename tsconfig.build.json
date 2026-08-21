@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json.schemastore.org/tsconfig",
+
+  // Emit. `dist/` is plain ESM that plain `node` runs with no loader and no
+  // flags — which is what rung 3 (`make e2e`, the real binary) and rung 4
+  // (the image) actually execute.
+  "extends": "./tsconfig.json",
+
+  "compilerOptions": {
+    "noEmit": false,
+    "rootDir": "src",
+    "outDir": "dist",
+    "sourceMap": true,
+    "declaration": false,
+    "incremental": true,
+    "tsBuildInfoFile": "dist/.tsbuildinfo"
+  },
+
+  "include": ["src"],
+  "exclude": ["src/**/*.test.ts"]
+}

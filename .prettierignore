@@ -1,0 +1,10 @@
+node_modules/
+dist/
+coverage/
+pnpm-lock.yaml
+
+# Markdown is hand-written and hand-wrapped: prettier normalizes *emphasis* to
+# _emphasis_ and reflows ASCII tables, both of which diverge this repo from the
+# collection's documents. What matters about these files is enforced by the
+# N and R rules instead — see ../ENFORCEMENT.md.
+*.md

@@ -1,0 +1,165 @@
+# The verification ladder, as CI.
+#
+# The no-infra jobs run first and fast, because most failures are caught before
+# a container starts. Integration and e2e use service containers rather than
+# compose — but the same image and the same tag, so a local reproduction is
+# exact (../INFRASTRUCTURE.md §6, and §3 rule 5).
+#
+# Node and pnpm are read from `.nvmrc` and `package.json#packageManager`, so CI
+# cannot drift from a developer's machine. `engine-strict` makes a drift fail at
+# install rather than three rungs up.
+
+name: ci
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+
+permissions:
+  contents: read
+
+# A superseded run tells you nothing.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ── Rung 0 — nothing installed, and that is the point ────────────────────
+  ci:
+    name: fmt · arch · lint · typecheck · test · build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: make ci
+
+  audit:
+    name: dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: make audit
+
+  # ── Rung 2 — every adapter against the same suite as its memory twin ─────
+  integration:
+    name: contract suites vs real Postgres
+    runs-on: ubuntu-latest
+    needs: ci
+
+    services:
+      postgres:
+        # The same image and tag as docker-compose.yml. If these two ever
+        # diverge, CI is testing something nobody can reproduce locally
+        # (../INFRASTRUCTURE.md §3 rule 5).
+        #
+        # Known gap: compose also passes tuning flags (max_connections=200,
+        # fsync=off) via `command:`, which GitHub service containers cannot
+        # express. Collation is set below because it is correctness; the rest
+        # is local speed. When parallel suites need more than the default 100
+        # connections, this job moves to compose.
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+          # Collation is correctness, not tuning: ORDER BY must mean the same
+          # thing here as it does in compose, or keyset pagination diverges.
+          POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+        ports:
+          # The same host port as compose, so DATABASE_URL needs no CI-only
+          # override and there is one connection string to get wrong.
+          - 15420:5432
+        # A suite that starts before Postgres is ready fails for the wrong
+        # reason and teaches the wrong lesson.
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U app -d app"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+          --health-start-period 5s
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: make migrate
+
+      - run: make test-integration
+
+  # ── Rung 3 — the real binary ─────────────────────────────────────────────
+  e2e:
+    name: journeys vs the real binary
+    runs-on: ubuntu-latest
+    needs: integration
+
+    services:
+      postgres:
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: app
+          POSTGRES_PASSWORD: app
+          POSTGRES_DB: app
+          POSTGRES_INITDB_ARGS: --encoding=UTF8 --locale=C
+        ports:
+          - 15420:5432
+        options: >-
+          --health-cmd "pg_isready -h 127.0.0.1 -U app -d app"
+          --health-interval 2s
+          --health-timeout 3s
+          --health-retries 30
+          --health-start-period 5s
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: pnpm/action-setup@v6
+
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - run: make migrate
+
+      - run: make e2e
+
+      # On pass as well as on failure. The archived logs are the point of the
+      # suite: a green e2e run you cannot read afterwards proved less than you
+      # think it did.
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: e2e-logs
+          path: tests/e2e/logs/
+          if-no-files-found: ignore
+          retention-days: 14
