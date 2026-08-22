@@ -98,6 +98,13 @@ logger.warn('upstream rejected the request', redactKeys(request.headers));
 - **`redactKeys` over-matches on purpose.** `tokenCount` is redacted. A redacted
   metric is a nuisance; a logged bearer token is an incident, and those are not
   comparable costs.
+- **Except at three characters, where over-matching stops being small.** `pan`
+  as a substring redacted `span` — found in a real telemetry log line, not in a
+  test — and would take `panel` and `expand` with it. Fragments of three
+  characters or fewer now match a whole **segment**, split on separators and
+  camelCase humps, so `pan`, `card_pan`, `cardPan` and `X-PAN` all still redact
+  and `span` does not. Longer fragments keep the substring rule, because
+  `access_token` and `oauthState` depend on it.
 - **Only plain objects and arrays are traversed.** An `Error`, a `Date`, a
   `Map`, a `URL` is a **leaf**. Rebuilding one from its enumerable properties
   destroys it: `Error.message` and `.stack` are not enumerable, a `Date` has no
@@ -134,4 +141,5 @@ secret belongs there only as a `Secret`. [[brand]] — a brand holding a
 credential should wrap it; brands are erased and print as their base value.
 [[assert]] — renders primitives into messages, which is safe for discriminants
 and not for values. [[random]] — mints the tokens this wraps, and compares them
-without leaking by timing.
+without leaking by timing. [[telemetry]] — where `span` turned out to contain
+`pan`, which is how the segment rule got written.

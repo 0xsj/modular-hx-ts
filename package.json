@@ -20,6 +20,7 @@
   "devDependencies": {
     "@eslint/js": "10.0.1",
     "@types/node": "24.13.3",
+    "@types/pg": "^8.23.1",
     "dependency-cruiser": "18.2.0",
     "eslint": "10.9.0",
     "jiti": "^2.7.0",
@@ -30,5 +31,8 @@
     "typescript-eslint": "8.67.0",
     "typescript7": "npm:typescript@7.0.2",
     "vitest": "4.1.11"
+  },
+  "dependencies": {
+    "pg": "^8.23.0"
   }
 }

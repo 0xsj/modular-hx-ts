@@ -70,19 +70,30 @@ describe('commands', () => {
     });
   });
 
-  it('migrates to a no-op while no context owns a migration set', async () => {
-    // Different from failing: `make migrate` runs in CI before anything exists.
-    const { code, out } = await run(['migrate']);
+  it('refuses to migrate without a DSN, and says so', async () => {
+    // `migrate` now runs the real migrator, so this suite must not be able to
+    // reach a database: rung 0 needs nothing, and a smoke test that connects
+    // when `DATABASE_URL` happens to be exported is a rung-0 test in name only.
+    // The Makefile *does* export it, which is exactly how that would happen.
+    const dsn = process.env['DATABASE_URL'];
+    delete process.env['DATABASE_URL'];
+    try {
+      const { code } = await run(['migrate']);
 
-    expect(code).toBe(0);
-    expect(out).toContain('nothing to migrate');
-    expect(out).toContain('applied=0');
+      expect(code).toBe(78); // EX_CONFIG — a missing DSN is configuration
+    } finally {
+      if (dsn !== undefined) process.env['DATABASE_URL'] = dsn;
+    }
   });
 
   it('stamps system provenance on what it logs', async () => {
     // The composition root runs every command inside an origin, so a line
     // emitted by code that never asked for provenance still carries it.
-    const { out } = await run(['migrate']);
+    const dsn = process.env['DATABASE_URL'];
+    delete process.env['DATABASE_URL'];
+    const { out } = await run(['migrate']).finally(() => {
+      if (dsn !== undefined) process.env['DATABASE_URL'] = dsn;
+    });
 
     expect(out).toContain('actor=system:migrate');
     expect(out).toMatch(/correlation_id=\S+/);

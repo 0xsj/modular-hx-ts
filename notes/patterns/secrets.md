@@ -69,6 +69,46 @@ a process cannot retry its way out of trouble.
 from somewhere, and that somewhere is a file or a variable. It moves the problem
 rather than solving it.
 
+### One escape, inside the value
+
+Every variable is scanned, so a password that genuinely begins `env://` would be
+unrepresentable — the syntax would have broken the thing it was protecting. A
+`literal:` prefix is stripped and the remainder returned **verbatim**.
+
+Verbatim is the load-bearing word. Unlike a reference the remainder is *not*
+trimmed: a reference with surrounding whitespace is a typo, a password with a
+trailing space is a password, and an escape that quietly edited the value it was
+protecting would be worse than no escape at all.
+
+The check sits inside `follow`, not at the entry point, so a value reached
+through `env://` escapes exactly as a directly-set one does.
+
+**Rejected: a per-variable annotation** — `SMTP_PASSWORD_IS_LITERAL=1`, or a
+flag on the reader. It puts the escape in the schema, where the person writing
+the `.env` file cannot reach it, and doubles the surface for the rare case.
+
+### The check command exists to end the restart loop
+
+`modular-hx-ts secrets` prints each reference, its source, and a will-it-boot
+exit code, **without printing a value**.
+
+Without it, a broken reference surfaces as a process that exits 78 with one
+line; you fix that line, restart, and it exits 78 with the next — one variable
+per restart, against a deployment that is already down. `env` already collects
+every *parse* problem at once; this does the same for resolution, before the
+process is asked to boot at all.
+
+It needs no configuration, for the same reason `version` does not: a broken
+reference is *why* configuration will not load, so a check that required
+configuration would be unavailable exactly when it is wanted.
+
+**It resolves through `resolving`, not beside it.** A check with its own copy of
+the resolution path diagnoses a different program, and would agree with boot
+right up until the moment it mattered — the Kubernetes directory-mount form
+being the case most likely to differ. Rendering lives in the module rather than
+in `main.ts`, because the guarantee that no value is printed is this module's to
+keep and should not depend on every future caller remembering it.
+
 ## Example
 
 ```ts
@@ -89,6 +129,14 @@ env:
 
 ## Gotchas
 
+- **`literal:` must be checked before `parse`.** Otherwise the parser sees the
+  scheme inside the escaped value and treats the escape as a reference —
+  the one ordering bug this design can have.
+- **The check command must print nothing that came out of a file.** Its report
+  carries variable names, reference targets and failure reasons, and a test
+  asserts a known credential does not appear in either the rendered report or
+  the inspection objects. A check that leaked the secret it was verifying would
+  be worse than the restart loop it replaces.
 - **Resolution is lazy, so `problems()` is only complete after `load`.**
   Resolving everything up front would read files for values this process never
   wants, and fail on a reference belonging to a feature that is switched off. A
@@ -121,6 +169,7 @@ env:
 ## Used in
 
 - `src/shared/secrets/index.ts`
+- `src/shared/secrets/inspect.ts`
 - `src/shared/secrets/reference.ts`
 - `src/shared/secrets/filesystem.ts`
 - `src/shared/secrets/resolve.ts`

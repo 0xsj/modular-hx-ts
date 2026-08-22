@@ -19,7 +19,12 @@ import {
   describe as describeBuild,
   versionPayload,
 } from './shared/buildinfo/index.js';
-import { since, type Clock, systemClock } from './shared/clock/index.js';
+import {
+  minutes,
+  since,
+  type Clock,
+  systemClock,
+} from './shared/clock/index.js';
 import { digest } from './shared/digest/index.js';
 import { unavailable } from './shared/errors/index.js';
 import { isErr, isOk, unwrap } from './shared/result/index.js';
@@ -49,13 +54,29 @@ import {
   type Problem,
   type Source,
 } from './shared/env/index.js';
-import { resolving } from './shared/secrets/index.js';
+import {
+  inspect,
+  report as reportSecrets,
+  resolving,
+  willBoot,
+} from './shared/secrets/index.js';
 import { makeLifecycle } from './shared/lifecycle/index.js';
+import { makeHealth, servesTraffic } from './shared/health/index.js';
+import {
+  connect as connectPostgres,
+  migrate as applyMigrations,
+  type MigrationSet,
+} from './shared/postgres/index.js';
 import {
   Carrier,
   makeOrigins,
   type Origins,
 } from './shared/provenance/index.js';
+import {
+  memoryTelemetry,
+  noopTelemetry,
+  type Telemetry,
+} from './shared/telemetry/index.js';
 
 /**
  * Everything constructed once, at boot.
@@ -71,6 +92,7 @@ interface Kernel {
   readonly breaker: Breaker;
   readonly provenance: Origins;
   readonly log: Logger;
+  readonly telemetry: Telemetry;
 }
 
 export function wireKernel(config: AppConfig): Kernel {
@@ -95,6 +117,7 @@ export function wireKernel(config: AppConfig): Kernel {
     random,
     provenance: makeOrigins(ids),
     log,
+    telemetry: wireTelemetry(config, log),
     // Neither half of an id is defaulted: `systemIds` composes the two
     // adapters rather than being one, which is what keeps rule `I5` free of
     // exemptions.
@@ -102,6 +125,26 @@ export function wireKernel(config: AppConfig): Kernel {
     retry: makeRetry(clock, random),
     breaker: makeBreaker(clock),
   };
+}
+
+/**
+ * Which telemetry adapter this process runs with.
+ *
+ * `none` is the default and the only one that ships today. `otlp` and
+ * `prometheus` name exporters that live behind the same port; until that
+ * adapter lands, choosing one is reported rather than honoured, because a
+ * process that silently drops the traces it was configured to emit is worse
+ * than one that says so.
+ */
+function wireTelemetry(config: AppConfig, log: Logger): Telemetry {
+  if (config.traces !== 'none' || config.metrics !== 'none') {
+    log.warn('telemetry exporters are not wired yet', {
+      traces: config.traces,
+      metrics: config.metrics,
+      effective: 'none',
+    });
+  }
+  return noopTelemetry();
 }
 
 /**
@@ -127,6 +170,10 @@ export const SCHEMA = {
   logLevel: oneOf('LOG_LEVEL', LEVELS, { fallback: 'info' }),
   logFormat: oneOf('LOG_FORMAT', ['console', 'json'], { fallback: 'console' }),
   colour: optional(flag('FORCE_COLOR')),
+  traces: oneOf('TELEMETRY_TRACES', ['none', 'otlp'], { fallback: 'none' }),
+  metrics: oneOf('TELEMETRY_METRICS', ['none', 'prometheus'], {
+    fallback: 'none',
+  }),
   databaseUrl: optional(url('DATABASE_URL')),
 } as const;
 
@@ -161,24 +208,33 @@ async function serve(source: Source, config: AppConfig): Promise<number> {
     kernel.log.info('starting', {
       build: describeBuild(build),
       storage: config.storage,
+      traces: config.traces,
+      metrics: config.metrics,
       pid: process.pid,
     });
 
-    const lifecycle = makeLifecycle({
-      clock: systemClock(),
-      reporter: kernel.log,
-    });
+    const clock = systemClock();
+    const health = makeHealth({ clock });
+    const lifecycle = makeLifecycle({ clock, reporter: kernel.log });
 
-    // Nothing to register yet. `postgres`, `events` and `httpx` each become a
-    // component as they land, and start order here is their dependency order —
-    // which is what makes reverse-order shutdown correct rather than lucky.
+    // Registered **last**, so reverse order stops it **first**. That ordering
+    // is the point: INFRASTRUCTURE.md §7.3 wants readiness to report draining
+    // *before* anything closes, so the load balancer stops sending work while
+    // the process is still fully assembled and in-flight requests can finish.
+    //
+    // `postgres`, `events` and `httpx` each become a component as they land,
+    // registered ahead of this one — start order is dependency order, which is
+    // what makes reverse-order shutdown correct rather than lucky.
     lifecycle.add({
-      name: 'process',
-      stop: () => {
-        kernel.log.info('ready to exit', {
-          listening: false,
-          host: config.host,
-          port: config.port,
+      name: 'traffic',
+      stop: async () => {
+        health.drain();
+        const report = await health.ready();
+        kernel.log.info('draining', {
+          // Readiness now refuses traffic; liveness deliberately still passes,
+          // or the orchestrator would restart the process mid-drain.
+          serves_traffic: servesTraffic(report),
+          alive: servesTraffic(health.live()),
         });
       },
     });
@@ -188,6 +244,18 @@ async function serve(source: Source, config: AppConfig): Promise<number> {
       kernel.log.error('could not start', { err: started.error });
       return 70; // EX_SOFTWARE
     }
+
+    const readiness = await health.ready();
+    kernel.log.info('ready', {
+      status: readiness.status,
+      serves_traffic: servesTraffic(readiness),
+      checks: readiness.checks.length,
+      // `httpx` (L4) brings the server and the probe endpoints; until then the
+      // answer is computed and logged rather than served.
+      listening: false,
+      host: config.host,
+      port: config.port,
+    });
 
     // A second signal means the operator has stopped waiting.
     const release = lifecycle.handleSignals(() => {
@@ -213,7 +281,7 @@ async function serve(source: Source, config: AppConfig): Promise<number> {
  * allowed to be slow and chatty in a way a probe is not.
  */
 async function doctor(kernel: Kernel): Promise<number> {
-  const { clock, ids, random, retry, breaker, log } = kernel;
+  const { clock, ids, random, retry, breaker, log, telemetry } = kernel;
 
   return Carrier.run(kernel.provenance.forCli('doctor'), async () => {
     log.info('checking wiring', {
@@ -267,6 +335,27 @@ async function doctor(kernel: Kernel): Promise<number> {
       total: circuit.total,
     });
 
+    // A real span through whatever exporter is configured, and the same work
+    // against an in-memory recorder — which is the only way to *show* what a
+    // span carries when there is no collector to look at.
+    await telemetry.tracer.inSpan('doctor', (span) => {
+      span.setAttribute('checks', 'wiring');
+    });
+    telemetry.meter.counter('doctor_runs').add(1);
+
+    const recorder = memoryTelemetry(clock);
+    await recorder.tracer.inSpan('self check', () => undefined);
+    const [span] = recorder.spans();
+    log.info('telemetry', {
+      span: span?.name,
+      // Correlation came from the ambient provenance — telemetry reads it, and
+      // never becomes the source of it.
+      correlated:
+        span?.attributes['correlation_id'] === Carrier.require().correlationId,
+      // Nothing left open: `inSpan` ends its span whatever happens.
+      open: recorder.open(),
+    });
+
     log.info('provenance', {
       // Ambient, from a call that was handed nothing.
       correlation: Carrier.require().correlationId,
@@ -277,6 +366,31 @@ async function doctor(kernel: Kernel): Promise<number> {
   });
 }
 
+/**
+ * `secrets` — every reference, its source, and a will-it-boot exit code.
+ *
+ * `../MODULES.md` §2 requires it, and the reason is the restart loop it
+ * replaces: a broken reference otherwise surfaces as a process that exits 78
+ * with one line, then exits 78 again with the next, one variable per restart,
+ * against a deployment that is already down.
+ *
+ * **Needs no configuration**, like `version` — a broken secret is precisely
+ * when configuration will not load, so a check that required it would be
+ * unavailable exactly when it is wanted.
+ *
+ * No value is printed. That guarantee belongs to `secrets`, which is why the
+ * rendering lives there and this function only chooses the variables.
+ */
+function secrets(source: Source): number {
+  const inspected = inspect(
+    source,
+    Object.values(SCHEMA).map((reader) => reader.variable),
+  );
+
+  process.stdout.write(`${reportSecrets(inspected)}\n`);
+  return willBoot(inspected) ? 0 : 78; // EX_CONFIG
+}
+
 function version(source: Source): number {
   process.stdout.write(
     `${JSON.stringify(versionPayload(readBuildInfo(source)), null, 2)}\n`,
@@ -284,12 +398,56 @@ function version(source: Source): number {
   return 0;
 }
 
-function migrate(kernel: Kernel): number {
-  // `make migrate` calls this. No context owns a migration set yet, so there is
-  // genuinely nothing to apply — which is different from failing.
-  return Carrier.run(kernel.provenance.forMigration(), () => {
-    kernel.log.info('nothing to migrate', { applied: 0 });
-    return 0;
+/**
+ * The migration registry.
+ *
+ * Every context contributes its own set as it lands — `identity`, `audit`,
+ * `orgs` — and `../MODULES.md` §3 namespaces them per context so two can both
+ * have an `0001`. Empty today because no context exists, which is **not** the
+ * same as having nothing to do: the run still connects, takes the advisory
+ * lock and ensures `schema_migrations`, so the path is exercised on every
+ * deploy rather than first exercised by the first migration.
+ */
+const MIGRATIONS: MigrationSet = [];
+
+async function migrate(kernel: Kernel, config: AppConfig): Promise<number> {
+  return Carrier.run(kernel.provenance.forMigration(), async () => {
+    if (config.databaseUrl === undefined) {
+      // A missing DSN is a configuration problem, not a migration failure.
+      kernel.log.error('DATABASE_URL is not set');
+      return 78; // EX_CONFIG
+    }
+
+    const db = connectPostgres({
+      dsn: config.databaseUrl,
+      // A migration is the one caller that legitimately runs longer than a
+      // request; the lock budget is deliberately left at its default, because
+      // a migration that cannot get its lock should fail fast rather than hold
+      // the deploy open while it blocks live traffic.
+      statementTimeout: minutes(10),
+      applicationName: 'modular-hx-ts:migrate',
+      maxConnections: 1,
+    });
+
+    try {
+      const started = kernel.clock.elapsed();
+      const report = await applyMigrations(db, MIGRATIONS);
+
+      kernel.log.info('migrated', {
+        applied: report.applied.length,
+        already_applied: report.alreadyApplied,
+        took_ms: Math.round(since(kernel.clock, started)),
+      });
+      for (const one of report.applied) {
+        kernel.log.info('applied', { context: one.context, name: one.name });
+      }
+      return 0;
+    } catch (error) {
+      kernel.log.error('migration failed', { err: error });
+      return 70; // EX_SOFTWARE
+    } finally {
+      await db.close();
+    }
   });
 }
 
@@ -353,6 +511,10 @@ export async function main(argv: readonly string[]): Promise<number> {
       // Answers without configuration, so a broken deploy can still be
       // identified — which is exactly when somebody asks what is deployed.
       return version(source);
+    case 'secrets':
+      // Same reasoning: a broken reference is why configuration will not load,
+      // so the command that diagnoses it cannot depend on configuration.
+      return secrets(source);
     default:
       break;
   }
@@ -364,13 +526,13 @@ export async function main(argv: readonly string[]): Promise<number> {
     case 'serve':
       return serve(source, config);
     case 'migrate':
-      return migrate(wireKernel(config));
+      return migrate(wireKernel(config), config);
     case 'doctor':
       return doctor(wireKernel(config));
     default:
       process.stderr.write(
         `unknown command: ${command}\n` +
-          `usage: modular-hx-ts [serve|version|migrate|doctor]\n`,
+          `usage: modular-hx-ts [serve|version|secrets|migrate|doctor]\n`,
       );
       return 2;
   }

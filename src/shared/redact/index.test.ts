@@ -225,6 +225,42 @@ describe('redactKeys', () => {
   });
 });
 
+describe('a short fragment is a word, not a substring', () => {
+  it('still redacts a PAN in every convention it is written in', () => {
+    // Separators are the gap that matters: a list written in one convention
+    // silently misses the others.
+    expect(redactKeys({ pan: '4111111111111111' })).toEqual({ pan: REDACTED });
+    expect(redactKeys({ card_pan: '4111' })).toEqual({ card_pan: REDACTED });
+    expect(redactKeys({ cardPan: '4111' })).toEqual({ cardPan: REDACTED });
+    expect(redactKeys({ 'X-PAN': '4111' })).toEqual({ 'X-PAN': REDACTED });
+  });
+
+  it('leaves the words that merely contain it alone', () => {
+    // `span` was redacted in a real telemetry log line before this rule
+    // existed. At three characters the substring rule stops being a small
+    // over-match and starts being a wrong one.
+    expect(
+      redactKeys({ span: 'self check', panel: 'left', expand: true }),
+    ).toEqual({ span: 'self check', panel: 'left', expand: true });
+  });
+
+  it('applies the same rule to ssn', () => {
+    expect(redactKeys({ user_ssn: '000', lesson: 'one' })).toEqual({
+      user_ssn: REDACTED,
+      lesson: 'one',
+    });
+  });
+
+  it('keeps matching long fragments anywhere in the key', () => {
+    // The deliberate over-match: a redacted metric is a nuisance, a logged
+    // bearer token is an incident.
+    expect(redactKeys({ tokenCount: 3, oauthState: 'x' })).toEqual({
+      tokenCount: REDACTED,
+      oauthState: REDACTED,
+    });
+  });
+});
+
 describe('mask', () => {
   it('reveals the last few characters for the support case', () => {
     expect(mask(TOKEN)).toBe(`${REDACTED}DfGh`);

@@ -18,7 +18,13 @@
  * Note: `notes/patterns/secrets.md`.
  */
 
-export { type Reference, type Scheme, parse, describe } from './reference.js';
+export {
+  type Reference,
+  type Scheme,
+  parse,
+  describe,
+  literal,
+} from './reference.js';
 
 export {
   type FileSystem,
@@ -28,3 +34,11 @@ export {
 } from './filesystem.js';
 
 export { type Resolved, resolving } from './resolve.js';
+
+export {
+  type Inspection,
+  type Origin,
+  inspect,
+  report,
+  willBoot,
+} from './inspect.js';

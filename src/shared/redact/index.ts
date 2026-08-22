@@ -107,6 +107,13 @@ export function isSecret(value: unknown): value is Secret<unknown> {
  * Substrings over-match sometimes — a field named `tokenCount` is redacted —
  * and that is the right direction to be wrong in: a redacted metric is a
  * nuisance, a logged bearer token is an incident.
+ *
+ * **Except for the short ones.** A fragment of three characters or fewer —
+ * `ssn`, `pan` — matches a whole **segment** rather than any substring, because
+ * at that length the substring rule stops being a small over-match and starts
+ * being a wrong one: `span` is not a primary account number, and neither are
+ * `panel` or `expand`. `card_pan`, `cardPan` and `PAN` still redact, because
+ * segments survive both conventions.
  */
 export const SENSITIVE_KEYS: readonly string[] = [
   'password',
@@ -137,10 +144,29 @@ function isTraversable(value: object): boolean {
   return prototype === Object.prototype || prototype === null;
 }
 
+/** The words in a key. `X-Api-Key`, `api_key` and `apiKey` all give the same. */
+const segmentsOf = (key: string): readonly string[] =>
+  key
+    // A camelCase hump is a word boundary, and the only one with no character
+    // to split on.
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter((segment) => segment !== '')
+    .map((segment) => segment.toLowerCase());
+
+/** Below this length a fragment is a word, not a substring. See above. */
+const WHOLE_SEGMENT_AT_OR_BELOW = 3;
+
 const isSensitive = (key: string, fragments: readonly string[]): boolean => {
   // Strip case and separators: `X-Api-Key`, `api_key` and `apiKey` are one key.
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
-  return fragments.some((fragment) => normalized.includes(fragment));
+  const segments = segmentsOf(key);
+
+  return fragments.some((fragment) =>
+    fragment.length <= WHOLE_SEGMENT_AT_OR_BELOW
+      ? segments.includes(fragment)
+      : normalized.includes(fragment),
+  );
 };
 
 /**

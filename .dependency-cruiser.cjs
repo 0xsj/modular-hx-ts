@@ -20,7 +20,30 @@ const { LAYERS, VENDOR_SDKS } = require('./layers.cjs');
 const inModules = (modules) => `^src/shared/(${modules.join('|')})(/|$)`;
 
 /** Matches a package by resolved path or by bare, unresolved specifier. */
-const pkg = (patterns) => `^(node_modules/)?(${patterns.join('|')})(/|$)`;
+/**
+ * Match a package however the installer laid it out.
+ *
+ * Three forms, and all three are load-bearing:
+ *
+ * - `pg` — unresolvable, which is what dependency-cruiser reports for a package
+ *   that is declared in a rule but **not installed**.
+ * - `node_modules/pg/…` — npm and yarn's flat layout.
+ * - `node_modules/.pnpm/pg@8.23.0/node_modules/pg/…` — pnpm's, which is what
+ *   this repository actually produces.
+ *
+ * The original pattern was `^(node_modules/)?…`, which matched the first two
+ * and **not** the third. Every `S10` rule therefore passed vacuously for any
+ * package that was actually installed, and would have started failing to
+ * protect anything the moment one was — silently, because the fixture that
+ * proves the rule uses an import that is never installed either.
+ *
+ * `pg` is the first vendor package this repository installs, and the fixture
+ * went red on the same commit. That is what the fixtures are for.
+ */
+const pkg = (patterns) => {
+  const any = patterns.join('|');
+  return `((^|/)node_modules/(${any})(/|$))|(^(${any})(/|$))`;
+};
 
 // --- S1 · layer ordering ---------------------------------------------------
 

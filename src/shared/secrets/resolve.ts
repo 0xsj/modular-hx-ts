@@ -15,7 +15,7 @@
 
 import { type Problem, type Source } from '../env/index.js';
 import { type FileSystem, nodeFileSystem } from './filesystem.js';
-import { describe, parse, type Reference } from './reference.js';
+import { describe, literal, parse, type Reference } from './reference.js';
 
 /**
  * A reference may point at another variable, which may itself be a reference.
@@ -62,6 +62,12 @@ export function resolving(
     depth: number,
   ): string | undefined => {
     if (raw === undefined) return undefined;
+
+    // The escape, checked before anything else — `literal:env://x` is a
+    // password that begins `env://`, not a reference. A chain may also *end*
+    // in one, which is why this sits inside `follow` rather than at the entry.
+    const escaped = literal(raw);
+    if (escaped !== undefined) return escaped;
 
     const reference = parse(raw);
     if (reference === undefined) return raw;

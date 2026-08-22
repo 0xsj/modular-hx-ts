@@ -26,6 +26,10 @@ export default defineConfig({
           name: 'integration',
           environment: 'node',
           include: ['tests/integration/**/*.test.ts'],
+          // Probes the database once, in the main process, and hands the answer
+          // to every worker. Without it the gate probes per worker and reports
+          // the same absence several times over.
+          globalSetup: ['tests/testx/global-setup.ts'],
           restoreMocks: true,
           // A real Postgres is slower than a map, and a suite that times out
           // fails for the wrong reason.

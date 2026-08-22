@@ -160,3 +160,51 @@ describe('architecture rules', () => {
     ).toEqual([]);
   });
 });
+
+/**
+ * `S10` matches a package however the installer laid it out.
+ *
+ * A fixture cannot prove this half: fixture trees have no `node_modules`, so
+ * every import in one is *unresolvable*, and an unresolvable import exercises
+ * only the first of the three forms below. The rule therefore passed vacuously
+ * for any package actually installed — which nothing was, until `pg`.
+ *
+ * These assert the pattern directly, which is the only way to cover the layout
+ * this repository really produces.
+ */
+describe('S10 matches an installed package, not just an absent one', () => {
+  const rule = config.forbidden.find((r) => r.name === 'S10-vendor-postgres');
+  // `to.path` is typed as a union that includes string[] and RegExp; this rule
+  // set only ever produces a string, and the assertion below fails loudly if
+  // that ever stops being true.
+  const pattern = (rule as { to?: { path?: unknown } } | undefined)?.to?.path;
+
+  it('is a single pattern, as the rest of this block assumes', () => {
+    expect(typeof pattern).toBe('string');
+  });
+
+  const matches = (path: string): boolean =>
+    new RegExp(String(pattern)).test(path);
+
+  it('matches the unresolvable form — the package is not installed', () => {
+    expect(matches('pg')).toBe(true);
+  });
+
+  it('matches npm and yarn’s flat layout', () => {
+    expect(matches('node_modules/pg/lib/index.js')).toBe(true);
+  });
+
+  it('matches pnpm’s layout, which is what this repo produces', () => {
+    // The one the original pattern missed, because `.pnpm` sits between
+    // `node_modules/` and the package name. Every S10 rule was inert for any
+    // installed package until this was fixed.
+    expect(
+      matches('node_modules/.pnpm/pg@8.23.0/node_modules/pg/esm/index.mjs'),
+    ).toBe(true);
+  });
+
+  it('does not match a package that merely starts with the same letters', () => {
+    expect(matches('node_modules/pgadmin/index.js')).toBe(false);
+    expect(matches('pgbouncer')).toBe(false);
+  });
+});

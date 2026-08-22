@@ -8,7 +8,15 @@ import {
   url,
 } from '../env/index.js';
 import { isErr, unwrap } from '../result/index.js';
-import { fakeFileSystem, parse, resolving } from './index.js';
+import {
+  fakeFileSystem,
+  inspect,
+  literal,
+  parse,
+  report,
+  resolving,
+  willBoot,
+} from './index.js';
 
 const resolve = (
   values: Record<string, string | undefined>,
@@ -266,5 +274,143 @@ describe('with env', () => {
     expect(reported).toContain('DATABASE_URL');
     expect(secrets.problems()[0]?.variable).toBe('SMTP_PASSWORD');
     expect(secrets.problems()[0]?.message).toContain('no such file');
+  });
+});
+
+describe('the literal: escape', () => {
+  const check = (
+    values: Record<string, string | undefined>,
+    tree: Record<string, string | Record<string, string>> = {},
+  ): string | undefined => resolve(values, tree).source.get('SMTP_PASSWORD');
+
+  it('returns a password that genuinely begins env://', () => {
+    // MODULES.md §2. Without it the reference syntax makes a legitimate
+    // credential unrepresentable, which is a worse failure than the one the
+    // syntax prevents.
+    expect(check({ SMTP_PASSWORD: 'literal:env://not-a-reference' })).toBe(
+      'env://not-a-reference',
+    );
+  });
+
+  it('returns a password that genuinely begins file://', () => {
+    expect(check({ SMTP_PASSWORD: 'literal:file:///etc/passwd' })).toBe(
+      'file:///etc/passwd',
+    );
+  });
+
+  it('does not trim the remainder, because verbatim means verbatim', () => {
+    // A reference with surrounding whitespace is a typo; a password with a
+    // trailing space is a password. An escape that edited the value it was
+    // protecting would be worse than no escape.
+    expect(check({ SMTP_PASSWORD: 'literal:  spaced  ' })).toBe('  spaced  ');
+  });
+
+  it('strips only the first prefix, so the escape is itself escapable', () => {
+    expect(check({ SMTP_PASSWORD: 'literal:literal:x' })).toBe('literal:x');
+  });
+
+  it('works at the end of a chain, not just at the top', () => {
+    // The check lives inside `follow`, so a variable reached through env://
+    // escapes exactly as a directly-set one does.
+    expect(
+      check({
+        SMTP_PASSWORD: 'env://REAL',
+        REAL: 'literal:env://still-a-password',
+      }),
+    ).toBe('env://still-a-password');
+  });
+
+  it('is a prefix, never a substring', () => {
+    expect(check({ SMTP_PASSWORD: 'my-literal:value' })).toBe(
+      'my-literal:value',
+    );
+  });
+
+  it('is recognised on its own', () => {
+    expect(literal('literal:x')).toBe('x');
+    expect(literal('literal:')).toBe('');
+    expect(literal('env://x')).toBeUndefined();
+  });
+});
+
+describe('the check command', () => {
+  const look = (
+    values: Record<string, string | undefined>,
+    tree: Record<string, string | Record<string, string>> = {},
+  ) => inspect(fromRecord(values), Object.keys(values), fakeFileSystem(tree));
+
+  it('names where each value comes from', () => {
+    const seen = look(
+      {
+        FROM_FILE: 'file:///run/secrets/db',
+        FROM_ENV: 'env://OTHER',
+        OTHER: 'plain',
+        ESCAPED: 'literal:env://password',
+        INLINE: 'plain',
+        BLANK: '',
+      },
+      { '/run/secrets/db': 'postgres://u:p@host/db' },
+    );
+
+    expect(seen.map((i) => [i.variable, i.origin])).toEqual([
+      ['FROM_FILE', 'file'],
+      ['FROM_ENV', 'env'],
+      ['OTHER', 'inline'],
+      ['ESCAPED', 'literal'],
+      ['INLINE', 'inline'],
+      ['BLANK', 'unset'],
+    ]);
+    expect(seen.every((i) => i.ok)).toBe(true);
+    expect(willBoot(seen)).toBe(true);
+  });
+
+  it('prints no value, which is the whole constraint', () => {
+    // A check that leaked the credential it was verifying would be worse than
+    // the restart loop it replaces.
+    const seen = look(
+      { DATABASE_URL: 'file:///run/secrets/db' },
+      { '/run/secrets/db': 'postgres://user:hunter2@host/db' },
+    );
+
+    const printed = `${report(seen)}${JSON.stringify(seen)}`;
+    expect(printed).not.toContain('hunter2');
+    expect(printed).toContain('file:///run/secrets/db');
+  });
+
+  it('says which reference failed and why, and refuses to boot', () => {
+    const seen = look({ SMTP_PASSWORD: 'env://MISSING' });
+
+    expect(seen[0]?.ok).toBe(false);
+    expect(seen[0]?.problem).toBe('env://MISSING is not set');
+    expect(willBoot(seen)).toBe(false);
+    expect(report(seen)).toContain('will not boot');
+  });
+
+  it('reports every broken reference at once', () => {
+    // The restart loop is the thing being replaced: one variable per restart,
+    // against a deployment that is already down.
+    const seen = look({
+      A: 'env://MISSING_A',
+      B: 'file:///run/secrets/absent',
+      C: 'plain',
+    });
+
+    expect(seen.filter((i) => !i.ok).map((i) => i.variable)).toEqual([
+      'A',
+      'B',
+    ]);
+  });
+
+  it('resolves through the same path boot uses', () => {
+    // A Kubernetes directory mount is the case most likely to differ between
+    // a hand-written check and the real resolver.
+    const tree = { '/run/secrets/smtp': { password: 'hunter2\n' } };
+
+    expect(look({ P: 'file:///run/secrets/smtp#password' }, tree)[0]?.ok).toBe(
+      true,
+    );
+    expect(
+      resolve({ P: 'file:///run/secrets/smtp#password' }, tree).source.get('P'),
+    ).toBe('hunter2');
   });
 });

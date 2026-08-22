@@ -64,6 +64,43 @@ different values and must have different digests.
 it makes the digest depend on object construction order — which is to say, on
 nothing meaningful.
 
+### A suite cannot detect that it is wrong in its own way
+
+Every test in this module was written in the same repository as the code it
+checks. That catches mistakes; it cannot catch a **shared blind spot** — a
+reading of the spec that the implementation and its tests both got wrong
+together. The suite stays green, and the repository is confidently wrong.
+
+That is not hypothetical. The collection lost `err_kind` in five repositories at
+once, each silently, each with a green suite.
+
+So `../conformance/fixtures/canonical-json.json` is read here and asserted
+against: fifteen byte-exact vectors, generated from a working implementation and
+then verified against two more — Python, Go and TypeScript producing identical
+output for all fifteen, having never shared code. **A vector that fails is a
+defect here, not a bad vector.** Report the `name`, our bytes and the expected
+bytes; do not edit the fixture.
+
+They are chosen for exactly the places a correct implementation and `sort(keys)`
+part company:
+
+| Vector | What separates a correct implementation |
+| --- | --- |
+| `utf16-key-sort` | RFC 8785 sorts by **UTF-16 code unit** — not codepoint, not locale |
+| `control-chars` vs `other-controls` | the five short forms `\b \f \n \r \t`, and everything else as lowercase `\u00xx` |
+| `non-ascii-literal` | non-ASCII stays **literal UTF-8**, never `\u`-escaped — including an astral-plane codepoint |
+| `integers` | the largest safe value, where doubles stop being exact |
+| `empty-object`, `empty-array` | what every implementation gets right and no implementation tests |
+
+`digest` is where a blind spot costs the most: it is the parity mechanism the
+whole collection rests on, and every attestation, audit record and Merkle leaf
+is downstream of it.
+
+Asserted as **hex, never as a decoded string** — a trailing newline, a BOM and a
+lone surrogate all render identically in a terminal and differ in bytes. The
+digest is asserted too, and both must match: a digest that agreed while the
+bytes differed would mean something else was hashed.
+
 ## Example
 
 ```ts
@@ -95,6 +132,18 @@ if (unwrap(digest(before)) === unwrap(digest(after))) return noChange();
   `{"a":1}` and `{"a":"1"}` are not, because they are not.
 - **A refusal names its path** — `users.1.name` — because a canonicalization
   failure deep in a payload is otherwise unfindable.
+- **The vectors are read from `../conformance/`, not copied.** Same reason the
+  root documents are read in place: five copies drift within a week. A checkout
+  without the sibling directory **skips them by name** rather than passing
+  silently, and vendoring into `docs/` happens with publication. A skip is a
+  result, not a pass.
+- **Verified that they can fail.** Swapping the key sort for `localeCompare`
+  turns `utf16-key-sort` and `mixed` red, naming both. A fixture wired in so
+  loosely that it passes regardless is worse than none, because it reads as
+  proof.
+- **A new vector is added only when an implementation gets something wrong** —
+  never speculatively — and only after it is verified against two other
+  languages. A fixture is worth exactly what its cross-check was worth.
 
 ## Used in
 
