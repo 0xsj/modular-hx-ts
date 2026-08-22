@@ -35,7 +35,7 @@ export {
   guardrails,
 } from './config.js';
 
-export { type Postgres, connect, dbOver } from './pool.js';
+export { type Postgres, type Session, connect, dbOver } from './pool.js';
 
 export { kindForSqlState, sqlStateOf, asAppError } from './sqlstate.js';
 

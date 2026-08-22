@@ -33,7 +33,7 @@ export interface Violation {
 }
 
 /** The M rules this file enforces. One half of D5's loop. */
-export const SEMANTIC_RULES = ['M2', 'I5', 'M13'] as const;
+export const SEMANTIC_RULES = ['M2', 'I5', 'M13', 'M6'] as const;
 
 function sourceFiles(root: string) {
   const project = new Project({
@@ -215,10 +215,53 @@ export function m13DurationsAreMonotonic(root: string): Violation[] {
   return violations;
 }
 
+/**
+ * M6 — an event constant in `<ctx>/domain/` is prefixed `<ctx>.`.
+ *
+ * `../ENFORCEMENT.md`: *an event constant in `<ctx>/domain/` is prefixed
+ * `<ctx>.`* An event named for the wrong context routes to the wrong
+ * subscribers and lands in the wrong half of the audit graph, and both failures
+ * look like nothing at all until somebody goes looking for an event that was
+ * published under a name they never search.
+ *
+ * **This rule lands against nothing.** There are no contexts yet, so today it
+ * checks an empty set — which is the phase-0 principle exactly: the rule
+ * arrives before the code it governs, so it never needs an allowlist for
+ * something that already exists.
+ *
+ * Detects any string literal in `src/contexts/<ctx>/domain/` that has the shape
+ * of an event name, and requires its first segment to be `<ctx>`.
+ */
+export function m6EventNamesMatchTheirContext(root: string): Violation[] {
+  const violations: Violation[] = [];
+  const shaped = /^[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*\.[a-z][a-z0-9_]*$/;
+
+  for (const file of sourceFiles(root)) {
+    const rel = relative(root, file.getFilePath()).split(sep).join('/');
+    const inDomain = /^src\/contexts\/([^/]+)\/domain\//.exec(rel);
+    if (inDomain === null) continue;
+
+    const context = inDomain[1] ?? '';
+    for (const literal of file.getDescendantsOfKind(SyntaxKind.StringLiteral)) {
+      const value = literal.getLiteralValue();
+      if (!shaped.test(value)) continue;
+      if (value.startsWith(`${context}.`)) continue;
+
+      violations.push({
+        rule: 'M6',
+        message: `${rel}:${String(literal.getStartLineNumber())} names the event "${value}" in context ${context} — an event constant is prefixed with its own context (M6)`,
+      });
+    }
+  }
+
+  return violations;
+}
+
 export function allSemanticRules(root: string): Violation[] {
   return [
     ...m2TimeIsInjected(root),
     ...i5RandomnessIsInjected(root),
     ...m13DurationsAreMonotonic(root),
+    ...m6EventNamesMatchTheirContext(root),
   ];
 }

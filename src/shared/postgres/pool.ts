@@ -55,7 +55,35 @@ export function dbOver(runner: pg.Pool | pg.PoolClient): DB {
   };
 }
 
+/**
+ * One connection, held for as long as the caller wants it.
+ *
+ * Exists because a **session-scoped** thing — an advisory lock, a temporary
+ * table, a `SET` that must outlive one statement — belongs to the connection
+ * that created it, and a pooled `DB` gives no promise about which connection a
+ * query lands on.
+ *
+ * It is also what keeps rule `S10` true: `lock` needs a connection it owns, and
+ * without this it would have to import `pg` to name a `PoolClient` — which the
+ * rule forbids, and rightly. The SDK stays inside this module and the concept
+ * comes out.
+ */
+export interface Session extends DB {
+  /**
+   * Give the connection back.
+   *
+   * `discard` **ends the session** rather than returning it to the pool, which
+   * releases anything session-scoped it still holds. That is the same path a
+   * crashed process takes, and the right answer whenever the session's state is
+   * unknown.
+   */
+  release(discard?: boolean): void;
+}
+
 export interface Postgres extends DB {
+  /** A connection of one's own. The caller must release it. */
+  session(): Promise<Session>;
+
   /**
    * Run `fn` inside a transaction, committing if it returns and rolling back if
    * it throws.
@@ -156,6 +184,51 @@ export function connect(config: Config): Postgres {
         // discards it instead of handing a dead socket to the next caller.
         client.release(died === undefined ? undefined : true);
       }
+    },
+
+    async session(): Promise<Session> {
+      const client = await pool.connect().catch((error: unknown) => {
+        throw asAppError(error, 'could not acquire a session');
+      });
+
+      // Same hazard as `withinTx`, and I did not carry the lesson over the
+      // first time: a checked-out client that dies emits `error` on **itself**,
+      // not on the pool, and an unhandled `error` event takes the process down.
+      //
+      // A session is *more* exposed than a transaction, not less. It is held for
+      // as long as a caller wants a lock, and the whole reason advisory locks
+      // were chosen is that a holder can die — so the backend going away is a
+      // designed-for event here rather than an exceptional one.
+      // **It returns itself.** A session's backend dying is a designed-for
+      // event — advisory locks were chosen precisely because a holder can die —
+      // and the caller that would have released it is, in that scenario, gone.
+      // Waiting for a release that will never come leaves the client checked
+      // out forever, and `pool.end()` then waits for it forever too. That is
+      // exactly how this surfaced: a 30-second hook timeout in teardown, long
+      // after the test it belonged to had passed.
+      let settled = false;
+      const settle = (discard: boolean): void => {
+        if (settled) return;
+        settled = true;
+        client.off('error', onError);
+        client.release(discard ? true : undefined);
+      };
+
+      function onError(): void {
+        // Destroyed, never pooled: the session's state is unknown and it may
+        // still nominally hold something.
+        settle(true);
+      }
+      client.on('error', onError);
+
+      return {
+        ...dbOver(client),
+        // Idempotent, so a caller releasing a session that already died is a
+        // no-op rather than pg's "released twice" error.
+        release: (discard) => {
+          settle(discard === true);
+        },
+      };
     },
 
     async ping(): Promise<void> {
