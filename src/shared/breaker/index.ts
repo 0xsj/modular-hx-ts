@@ -147,7 +147,10 @@ export function makeBreaker(
     return created;
   };
 
-  const epochNow = (): number => Math.floor(clock.monotonic() / bucketMs);
+  // Rule M13: the window is measured on the monotonic reading. A cooldown
+  // computed from wall-clock arithmetic holds a circuit open for an hour after
+  // a one-second NTP correction, and closes one early after a jump forward.
+  const epochNow = (): number => Math.floor(clock.elapsed() / bucketMs);
 
   const totals = (entry: KeyState): { failures: number; total: number } => {
     const oldest = epochNow() - policy.buckets + 1;
@@ -187,7 +190,7 @@ export function makeBreaker(
     const { failures, total } = totals(entry);
     entry.state = to;
 
-    if (to === 'open') entry.openedAt = clock.monotonic();
+    if (to === 'open') entry.openedAt = clock.elapsed();
     if (to === 'closed') entry.buckets = makeWindow(policy.buckets);
     if (to !== 'half_open') entry.probeInFlight = false;
 
@@ -208,7 +211,7 @@ export function makeBreaker(
       const entry = stateFor(key);
 
       if (entry.state === 'open') {
-        if (clock.monotonic() - entry.openedAt < policy.resetAfter) {
+        if (clock.elapsed() - entry.openedAt < policy.resetAfter) {
           return err(unavailable(`${describe}: circuit open for ${key}`));
         }
         transition(key, entry, 'half_open');

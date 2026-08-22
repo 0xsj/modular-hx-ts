@@ -149,6 +149,53 @@ describe('redactKeys', () => {
     expect(original).toEqual(copy);
   });
 
+  it('passes a value that is not a bag of fields straight through', () => {
+    // Traversal rebuilds an object from its enumerable properties. A Date has
+    // none, so it came out as `{}` — in a log line, where the timestamp was
+    // the point. Same class of bug as the Error case below.
+    const at = new Date('2026-01-01T00:00:00.000Z');
+    const tags = new Map([['a', 1]]);
+    const bytes = new Uint8Array([1, 2, 3]);
+
+    const scrubbed = redactKeys({ at, tags, bytes }) as Record<string, unknown>;
+
+    expect(scrubbed['at']).toBe(at);
+    expect(scrubbed['tags']).toBe(tags);
+    expect(scrubbed['bytes']).toBe(bytes);
+  });
+
+  it('still traverses a null-prototype object, which headers often are', () => {
+    const headers = Object.assign(Object.create(null) as object, {
+      'X-Api-Key': 'sk_live_51H8yQ',
+      accept: 'application/json',
+    });
+
+    const scrubbed = redactKeys(headers) as Record<string, unknown>;
+
+    expect(scrubbed['X-Api-Key']).toBe(REDACTED);
+    expect(scrubbed['accept']).toBe('application/json');
+  });
+
+  it('passes an Error through instead of dismantling it', () => {
+    // Rebuilding an Error from its enumerable properties drops `message` and
+    // `stack`, which are not enumerable, and strips the prototype. A logger
+    // downstream then loses the whole point of the line it was writing.
+    const cause = new Error('connection refused');
+    const scrubbed = redactKeys({ err: cause }) as { err: unknown };
+
+    expect(scrubbed.err).toBe(cause);
+    expect(scrubbed.err).toBeInstanceOf(Error);
+    expect((scrubbed.err as Error).message).toBe('connection refused');
+  });
+
+  it('still redacts a Secret held inside an error’s details', () => {
+    // Errors pass through, so a secret in one must protect itself.
+    const held = secret('sk_live_51H8yQwErTyUi');
+    const scrubbed = redactKeys({ err: { details: { apiKey: held } } });
+
+    expect(JSON.stringify(scrubbed)).not.toContain('sk_live');
+  });
+
   it('survives a cycle', () => {
     const node: Record<string, unknown> = { name: 'root' };
     node['self'] = node;

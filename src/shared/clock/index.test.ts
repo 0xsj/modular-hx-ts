@@ -1,6 +1,9 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, expectTypeOf, it } from 'vitest';
 import { isAppError, Kind } from '../errors/index.js';
 import {
+  since,
+  until,
+  type Clock,
   fakeClock,
   hours,
   millis,
@@ -18,6 +21,48 @@ const kindOfRejection = async (promise: Promise<unknown>): Promise<unknown> => {
   }
   return undefined;
 };
+
+describe('the port', () => {
+  it('is exactly two readings', () => {
+    // `../MODULES.md` fixes this surface rather than leaving it per repo: two
+    // repos chose differently and one produced a latent bug. Waiting is not on
+    // it — a module that needs to wait declares its own port.
+    expectTypeOf<Clock>().toEqualTypeOf<{
+      now(): Date;
+      elapsed(): number;
+    }>();
+  });
+});
+
+describe('since and until', () => {
+  it('measure against the monotonic reading', async () => {
+    const clock = fakeClock();
+    const startedAt = clock.elapsed();
+    const deadline = clock.elapsed() + seconds(30);
+
+    await clock.advance(seconds(10));
+
+    expect(since(clock, startedAt)).toBe(10_000);
+    expect(until(clock, deadline)).toBe(20_000);
+  });
+
+  it('go negative past a deadline rather than clamping', () => {
+    // A budget that reports zero when it is overdrawn hides how overdrawn.
+    const clock = fakeClock();
+
+    expect(until(clock, clock.elapsed() - seconds(5))).toBe(-5_000);
+  });
+
+  it('are unaffected by the wall clock moving', async () => {
+    const clock = fakeClock();
+    const startedAt = clock.elapsed();
+
+    await clock.advance(seconds(10));
+    clock.setWallClock(new Date('2020-01-01T00:00:00.000Z'));
+
+    expect(since(clock, startedAt)).toBe(10_000);
+  });
+});
 
 describe('Millis', () => {
   it('converts each unit to milliseconds', () => {
@@ -51,7 +96,7 @@ describe('fakeClock', () => {
     await Promise.resolve();
 
     expect(clock.now().getTime()).toBe(before);
-    expect(clock.monotonic()).toBe(0);
+    expect(clock.elapsed()).toBe(0);
   });
 
   it('moves wall and monotonic time together when advanced', async () => {
@@ -59,7 +104,7 @@ describe('fakeClock', () => {
 
     await clock.advance(minutes(90));
 
-    expect(clock.monotonic()).toBe(5_400_000);
+    expect(clock.elapsed()).toBe(5_400_000);
     expect(clock.now().toISOString()).toBe('2026-01-01T01:30:00.000Z');
   });
 
@@ -192,13 +237,13 @@ describe('monotonic time', () => {
     // The NTP correction that breaks duration measurement everywhere it is done
     // with wall-clock time. This is why the port exposes both.
     const clock = fakeClock();
-    const startedAt = clock.monotonic();
+    const startedAt = clock.elapsed();
 
     await clock.advance(seconds(10));
     clock.setWallClock(new Date('2020-01-01T00:00:00.000Z'));
 
     expect(clock.now().getFullYear()).toBe(2020);
-    expect(clock.monotonic() - startedAt).toBe(10_000);
+    expect(clock.elapsed() - startedAt).toBe(10_000);
   });
 });
 
@@ -211,7 +256,7 @@ describe('systemClock', () => {
 
   it('has a monotonic reading that never goes backwards', () => {
     const clock = systemClock();
-    const readings = [clock.monotonic(), clock.monotonic(), clock.monotonic()];
+    const readings = [clock.elapsed(), clock.elapsed(), clock.elapsed()];
 
     expect(readings[1]).toBeGreaterThanOrEqual(readings[0] ?? 0);
     expect(readings[2]).toBeGreaterThanOrEqual(readings[1] ?? 0);
@@ -219,13 +264,13 @@ describe('systemClock', () => {
 
   it('actually waits', async () => {
     const clock = systemClock();
-    const before = clock.monotonic();
+    const before = clock.elapsed();
 
     await clock.sleep(millis(20));
 
     // setTimeout may fire a hair early on some platforms; the assertion is that
     // real time passed, not that the timer is precise.
-    expect(clock.monotonic() - before).toBeGreaterThanOrEqual(15);
+    expect(clock.elapsed() - before).toBeGreaterThanOrEqual(15);
   });
 
   it('rejects when aborted, before and during the wait', async () => {

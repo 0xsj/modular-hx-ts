@@ -35,44 +35,76 @@ export const minutes = (value: number): Millis => millis(value * 60_000);
 export const hours = (value: number): Millis => millis(value * 3_600_000);
 
 /**
- * The port.
+ * The port. **Two readings, and nothing else.**
  *
- * Two notions of time, because they answer different questions and confusing
- * them is a real outage:
+ * `../../../MODULES.md` fixes this surface rather than leaving it to each repo,
+ * because two repos chose differently and one of them produced a latent bug.
  *
  * - `now()` is **wall-clock** time. It is what you store, log and compare
- *   against other machines, and it can jump backwards when NTP corrects it.
- * - `monotonic()` only ever moves forward. It is meaningless as an absolute
+ *   against other machines, and it moves backwards under NTP and DST.
+ * - `elapsed()` only ever moves forward. It is meaningless as an absolute
  *   value and correct for measuring how long something took.
+ *
+ * **These are two different clocks, not two conveniences.**
+ *
+ * **Waiting is deliberately absent.** A module that needs to wait declares its
+ * own port, because interfaces belong to the consumer — see `Sleeper` in
+ * `retry`. Both implementations here offer `sleep`, so such a port always has a
+ * ready implementation, without `clock` dictating its shape.
  */
 export interface Clock {
-  /** Wall-clock time. What a row's `created_at` records. */
+  /** Wall-clock time, UTC. What a row's `created_at` records. */
   now(): Date;
 
   /**
    * Milliseconds from an arbitrary origin, never decreasing. Only differences
-   * mean anything. Use this for latency, timeouts and backoff.
+   * mean anything. Use this for latency, timeouts and backoff — rule `M13`.
    */
-  monotonic(): number;
+  elapsed(): number;
+}
 
+/**
+ * Waiting, cancellably.
+ *
+ * Not part of `Clock`. Declared here only because both implementations below
+ * satisfy it; a consumer that needs to wait should declare its own equivalent
+ * and accept whatever satisfies it.
+ */
+export interface Sleeps {
   /**
-   * Wait, cancellably.
-   *
    * Rejects with a `Canceled` error if the signal aborts — before or during the
    * wait. It never resolves early and pretends it waited.
    */
   sleep(duration: Millis, signal?: AbortSignal): Promise<void>;
 }
 
+/**
+ * How long since a monotonic reading, and how long until a deadline.
+ *
+ * Free functions taking a `Clock` rather than methods on it: every
+ * implementation would compute them identically, and a default nobody varies is
+ * not part of a contract.
+ */
+export const since = (clock: Clock, reading: number): Millis =>
+  millis(clock.elapsed() - reading);
+
+export const until = (clock: Clock, deadline: number): Millis =>
+  millis(deadline - clock.elapsed());
+
 /** A clock a test drives by hand. */
-export interface FakeClock extends Clock {
+export interface FakeClock extends Clock, Sleeps {
   /**
    * Move time forward, releasing every sleep whose deadline is now in the past,
    * in deadline order.
    */
   advance(duration: Millis): Promise<void>;
 
-  /** Jump wall-clock time without touching the monotonic reading. */
+  /**
+   * Jump wall-clock time without touching the monotonic reading.
+   *
+   * An NTP correction, in other words. Advancing moves both readings because
+   * time passed; this moves only one because it did not.
+   */
   setWallClock(instant: Date): void;
 
   /** How many sleeps are outstanding. A leak detector for tests. */
@@ -81,11 +113,11 @@ export interface FakeClock extends Clock {
 
 // --- the real one ----------------------------------------------------------
 
-export function systemClock(): Clock {
+export function systemClock(): Clock & Sleeps {
   return {
     now: () => new Date(),
 
-    monotonic: () => performance.now(),
+    elapsed: () => performance.now(),
 
     sleep: (duration, signal) =>
       new Promise((resolve, reject) => {
@@ -141,7 +173,7 @@ export function fakeClock(
   return {
     now: () => new Date(wallMs),
 
-    monotonic: () => monotonicMs,
+    elapsed: () => monotonicMs,
 
     sleep: (duration, signal) =>
       new Promise<void>((resolve, reject) => {

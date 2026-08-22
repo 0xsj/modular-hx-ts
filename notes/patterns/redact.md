@@ -98,6 +98,14 @@ logger.warn('upstream rejected the request', redactKeys(request.headers));
 - **`redactKeys` over-matches on purpose.** `tokenCount` is redacted. A redacted
   metric is a nuisance; a logged bearer token is an incident, and those are not
   comparable costs.
+- **Only plain objects and arrays are traversed.** An `Error`, a `Date`, a
+  `Map`, a `URL` is a **leaf**. Rebuilding one from its enumerable properties
+  destroys it: `Error.message` and `.stack` are not enumerable, a `Date` has no
+  own properties at all, and every one loses its prototype so `instanceof`
+  returns false downstream. Both halves were live bugs found by running the
+  logger — an error reached a log line with its message gone, and a `Date`
+  arrived as `{}`. Traversal is for bags of fields, and a `Date` is not one.
+  A null-prototype object still traverses, because a header map often is one.
 - **`redactKeys` copies, never mutates.** It is called on the way to a log, and
   a scrubber that damaged the value being processed would be far worse than the
   leak it prevented.

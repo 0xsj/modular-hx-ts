@@ -12,8 +12,13 @@ function that runs an operation, and repeats it only while the failure is one
 that could plausibly succeed unchanged. `backoffFor` is the pure schedule;
 `DEFAULT_POLICY` is four attempts, 50ms base, 2s cap.
 
-Everything it needs is injected — `Clock` to wait, `Random` to jitter — which is
-what lets a test verify an hour of backoff in a millisecond.
+Everything it needs is injected — a `Sleeper` to wait, `Random` to jitter —
+which is what lets a test verify an hour of backoff in a millisecond.
+
+**`Sleeper` is declared here, not imported from [[clock]].** Waiting is off the
+`Clock` port because interfaces belong to the consumer; `systemClock()` and
+`fakeClock()` both satisfy this one, so wiring costs nothing and the shape stays
+ours.
 
 ## Why
 
@@ -55,7 +60,7 @@ the herd worse: fixed delay is perfect synchronisation.
 
 ```ts
 // Wired once in the composition root, with the real clock and CSPRNG.
-const retry = makeRetry(systemClock(), systemRandom());
+const retry = makeRetry(systemClock(), systemRandom()); // the clock satisfies Sleeper
 
 // In an adapter: the description becomes the wrapping context.
 const rows = await retry(

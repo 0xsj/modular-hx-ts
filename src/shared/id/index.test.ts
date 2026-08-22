@@ -85,7 +85,7 @@ describe('time ordering', () => {
 
     const burst = Array.from({ length: 500 }, () => ids.uuid());
 
-    expect(clock.monotonic()).toBe(0);
+    expect(clock.elapsed()).toBe(0);
     expect([...burst].sort()).toEqual(burst);
     expect(new Set(burst).size).toBe(500);
 

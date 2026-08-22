@@ -125,6 +125,18 @@ export const SENSITIVE_KEYS: readonly string[] = [
   'pan',
 ];
 
+/**
+ * Whether this is a bag of fields, as opposed to a value that happens to be an
+ * object. Arrays and plain objects only — including `Object.create(null)`,
+ * which is what a parsed query string or a header map often is.
+ */
+function isTraversable(value: object): boolean {
+  if (Array.isArray(value)) return true;
+
+  const prototype: unknown = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
 const isSensitive = (key: string, fragments: readonly string[]): boolean => {
   // Strip case and separators: `X-Api-Key`, `api_key` and `apiKey` are one key.
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -149,6 +161,21 @@ export function redactKeys(
 ): unknown {
   if (isSecret(value)) return REDACTED;
   if (value === null || typeof value !== 'object') return value;
+
+  // Only plain objects and arrays are traversed. Everything else — an Error, a
+  // Date, a Map, a URL, a Buffer — is a **leaf**, and rebuilding one from its
+  // enumerable properties destroys it: `Error.message` and `.stack` are not
+  // enumerable, a `Date` has no own properties at all, and every one of them
+  // loses its prototype, so `instanceof` downstream returns false.
+  //
+  // Both halves of that were live bugs. An error reached a log line with its
+  // message gone; a `Date` arrived as `{}`. Traversal is for bags of fields,
+  // and a `Date` is not a bag of fields.
+  //
+  // A secret inside a leaf belongs in a `Secret`, which redacts itself wherever
+  // it is printed.
+  if (!isTraversable(value)) return value;
+
   if (seen.has(value)) return '[circular]';
 
   seen.add(value);

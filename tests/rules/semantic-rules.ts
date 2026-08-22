@@ -33,7 +33,7 @@ export interface Violation {
 }
 
 /** The M rules this file enforces. One half of D5's loop. */
-export const SEMANTIC_RULES = ['M2', 'I5'] as const;
+export const SEMANTIC_RULES = ['M2', 'I5', 'M13'] as const;
 
 function sourceFiles(root: string) {
   const project = new Project({
@@ -169,6 +169,56 @@ export function i5RandomnessIsInjected(root: string): Violation[] {
   return violations;
 }
 
+/**
+ * M13 — a duration is measured on the monotonic reading.
+ *
+ * `../MODULES.md` names the modules this binds: `breaker`, `ratelimit`,
+ * `retry`, `deadline` and `timers` must never compute an interval from
+ * `now()`. Wall time moves backwards under NTP and DST, so a cooldown computed
+ * from it can hold a circuit open for an hour after a one-second correction,
+ * and close one early after a jump forward.
+ *
+ * Detects arithmetic on `now()` — subtraction, or a comparison against a stored
+ * reading — inside those modules. Stamping a row with `now()` stays legal;
+ * only *intervals* are forbidden.
+ */
+export function m13DurationsAreMonotonic(root: string): Violation[] {
+  const BOUND = ['breaker', 'ratelimit', 'retry', 'deadline', 'timers'];
+
+  const inBoundModule = (path: string): boolean =>
+    BOUND.some((module) => path.includes(`/src/shared/${module}/`));
+
+  const violations: Violation[] = [];
+
+  for (const file of sourceFiles(root)) {
+    const path = file.getFilePath().split(sep).join('/');
+    if (!inBoundModule(path) || path.endsWith('.test.ts')) continue;
+
+    const rel = relative(root, file.getFilePath()).split(sep).join('/');
+
+    for (const binary of file.getDescendantsOfKind(
+      SyntaxKind.BinaryExpression,
+    )) {
+      const operator = binary.getOperatorToken().getText();
+      if (!['-', '<', '>', '<=', '>='].includes(operator)) continue;
+
+      const text = `${binary.getLeft().getText()} ${binary.getRight().getText()}`;
+      if (text.includes('now()')) {
+        violations.push({
+          rule: 'M13',
+          message: `${rel}:${String(binary.getStartLineNumber())} computes an interval from now() — durations use the monotonic reading (M13)`,
+        });
+      }
+    }
+  }
+
+  return violations;
+}
+
 export function allSemanticRules(root: string): Violation[] {
-  return [...m2TimeIsInjected(root), ...i5RandomnessIsInjected(root)];
+  return [
+    ...m2TimeIsInjected(root),
+    ...i5RandomnessIsInjected(root),
+    ...m13DurationsAreMonotonic(root),
+  ];
 }

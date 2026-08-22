@@ -71,6 +71,7 @@ const CASES: readonly (readonly [fixture: string, rule: string])[] = [
   ['s2-module-roots', 'S2-module-roots-contexts'],
   ['s2-module-roots-shared', 'S2-module-roots-shared'],
   ['s3-tooling-is-test-only', 'S3-tooling-is-test-only'],
+  ['s3-testkit-is-test-only', 'S3-tooling-is-test-only'],
   ['s5-shared-is-domain-free', 'S5-shared-is-domain-free'],
   ['s6-contexts-are-islands', 'S6-contexts-are-islands'],
   ['s7-domain-purity', 'S7-domain-purity'],

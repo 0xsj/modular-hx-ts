@@ -118,7 +118,7 @@ describe('retrying', () => {
     expect(unwrap(result)).toBe('ok');
     expect(operation).toHaveBeenCalledOnce();
     expect(clock.pending()).toBe(0);
-    expect(clock.monotonic()).toBe(0);
+    expect(clock.elapsed()).toBe(0);
   });
 
   it('retries a retryable failure and returns the eventual success', async () => {
@@ -188,7 +188,7 @@ describe('kind awareness', () => {
 
     expect(isErr(result) && result.error.kind).toBe(Kind.Forbidden);
     expect(calls()).toBe(1);
-    expect(clock.monotonic()).toBe(0);
+    expect(clock.elapsed()).toBe(0);
   });
 
   it('does not repeat a conflict, which reproduces itself', async () => {

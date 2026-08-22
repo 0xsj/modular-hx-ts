@@ -13,17 +13,28 @@
  *    at the same moment, so the recovering dependency is hit by the whole fleet
  *    in lockstep, fails again, and the herd re-forms. The sleep must be random.
  *
- * Everything it depends on is injected: `Clock` for waiting, `Random` for
+ * Everything it depends on is injected: a `Sleeper` for waiting, `Random` for
  * jitter. That is what lets a test verify an hour of backoff in a millisecond.
  *
  * See `notes/techniques/retry.md`.
  */
 
 import { invariant } from '../assert/index.js';
-import { type Clock, millis, type Millis, seconds } from '../clock/index.js';
+import { millis, type Millis, seconds } from '../clock/index.js';
 import { type AppError, canceled, isRetryable } from '../errors/index.js';
 import { type Random } from '../random/index.js';
 import { attemptAsync, err, isErr, type Result } from '../result/index.js';
+
+/**
+ * The waiting this module needs, declared by the module that needs it.
+ *
+ * `clock` deliberately keeps waiting off its port — interfaces belong to the
+ * consumer. `systemClock()` and `fakeClock()` both satisfy this, so wiring it
+ * costs nothing and the shape stays ours.
+ */
+export interface Sleeper {
+  sleep(duration: Millis, signal?: AbortSignal): Promise<void>;
+}
 
 export interface Policy {
   /** Total attempts, including the first. `1` disables retrying. */
@@ -102,13 +113,13 @@ export type Retrier = <T>(
 ) => Promise<Result<T>>;
 
 /**
- * Build a retrier over an injected clock and randomness.
+ * Build a retrier over injected waiting and randomness.
  *
  * `describe` becomes the wrapping context on every attempt, so a failure
  * arrives already classified and already located — `query user by id:
  * connection refused` rather than `Error`.
  */
-export function makeRetry(clock: Clock, random: Random): Retrier {
+export function makeRetry(sleeper: Sleeper, random: Random): Retrier {
   return async function retry<T>(
     operation: () => Promise<T>,
     describe: string,
@@ -140,7 +151,7 @@ export function makeRetry(clock: Clock, random: Random): Retrier {
       options.onRetry?.({ attempt, delay, error: result.error });
 
       const waited = await attemptAsync(
-        () => clock.sleep(delay, options.signal),
+        () => sleeper.sleep(delay, options.signal),
         describe,
       );
       // A cancelled sleep ends the retry; it does not become another attempt.

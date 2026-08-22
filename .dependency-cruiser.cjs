@@ -74,7 +74,13 @@ module.exports = {
         'S2: a module is reached through its root, never an adapter subpackage. ' +
         'postgres is an implementation detail of the module that uses it.',
       severity: 'error',
-      from: { path: '^src/shared/([^/]+)/' },
+      from: {
+        path: '^src/shared/([^/]+)/',
+        // ../ENFORCEMENT.md S2 exempts test files: a test may reach a peer
+        // module's contract suite or testkit, which is the mechanism I2 and
+        // §4's builder require. Shipping code still goes through the root.
+        pathNot: '\\.(test|contract|testkit)\\.ts$',
+      },
       to: {
         path: '^src/shared/[^/]+/.+',
         pathNot: ['^src/shared/$1/', '^src/shared/[^/]+/index\\.ts$'],
@@ -86,7 +92,10 @@ module.exports = {
         'S2: a context reaches a shared module through its root, never through ' +
         'one of its adapters.',
       severity: 'error',
-      from: { path: '^src/contexts/' },
+      from: {
+        path: '^src/contexts/',
+        pathNot: '\\.(test|contract|testkit)\\.ts$',
+      },
       to: {
         path: '^src/shared/[^/]+/.+',
         pathNot: '^src/shared/[^/]+/index\\.ts$',
@@ -96,11 +105,15 @@ module.exports = {
     {
       name: 'S3-tooling-is-test-only',
       comment:
-        'S3: a contract suite is test tooling. It is imported by test files and ' +
-        'by other contract suites, and by nothing that ships.',
+        'S3: test tooling is imported by test files and by other test tooling, ' +
+        'and by nothing that ships. Two suffixes carry it: `.contract.ts` is a ' +
+        "port's one suite that every adapter passes, and `.testkit.ts` is a " +
+        'builder for a type whose constructors are deliberately closed. ' +
+        'TypeScript has no package-private, so the boundary Go gets from a ' +
+        '`_test` package has to be a rule here.',
       severity: 'error',
-      from: { pathNot: '\\.(test|contract)\\.ts$' },
-      to: { path: '\\.contract\\.ts$' },
+      from: { pathNot: '\\.(test|contract|testkit)\\.ts$' },
+      to: { path: '\\.(contract|testkit)\\.ts$' },
     },
 
     {

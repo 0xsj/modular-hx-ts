@@ -7,10 +7,17 @@ layer: L0
 
 ## What
 
-Time behind a port. `Clock` has three methods — `now()` for wall-clock time,
-`monotonic()` for elapsed time, and `sleep()` for waiting cancellably — with two
-implementations: `systemClock()`, and `fakeClock()` which only moves when a test
-moves it.
+Time behind a port. `Clock` has **exactly two readings** — `now()` for
+wall-clock time and `elapsed()` for monotonic time — with two implementations:
+`systemClock()`, and `fakeClock()` which only moves when a test moves it.
+`since` and `until` are free functions over a `Clock`.
+
+**Waiting is not on the port.** A module that needs to wait declares its own —
+see `Sleeper` in [[retry]]. Both implementations here offer `sleep`, so such a
+port always has a ready implementation without `clock` dictating its shape.
+
+`../MODULES.md` fixes this surface rather than leaving it to each repo, because
+two repos chose differently and one of them produced a latent bug.
 
 `Millis` is a branded number with `millis`, `seconds`, `minutes` and `hours`
 constructors.
@@ -40,7 +47,7 @@ subtracting two `Date.now()` readings will, occasionally and unreproducibly,
 compute a negative elapsed time — and whatever it feeds (a timeout, a backoff, a
 latency metric, a rate limiter) behaves absurdly for one request in a million.
 
-**Monotonic time** never decreases and has no meaning as an absolute value. It
+**Monotonic time** (`elapsed()`) never decreases and has no meaning as an absolute value. It
 answers "how long did that take", and nothing else.
 
 The port exposes both because the choice belongs to the caller and is easy to
@@ -62,16 +69,16 @@ the signature says a function depends on time, so nothing stops a module in
 
 ```ts
 // Injected, like every other dependency.
-export function makeRetry(clock: Clock) {
+export function makeRetry(clock: Clock, sleeper: Sleeper) {
   return async function retry<T>(op: () => Promise<T>, signal: AbortSignal) {
     let backoff = millis(50);
     for (;;) {
-      const started = clock.monotonic();              // elapsed: monotonic
+      const startedAt = clock.elapsed();              // M13: never now()
       const result = await attemptAsync(op, 'attempt');
       if (isOk(result) || !isRetryable(result.error)) return result;
 
-      recordLatency(clock.monotonic() - started);
-      await clock.sleep(backoff, signal);             // cancellable
+      recordLatency(since(clock, startedAt));
+      await sleeper.sleep(backoff, signal);           // cancellable
       backoff = millis(backoff * 2);
     }
   };
@@ -98,6 +105,14 @@ await clock.advance(hours(1));
 - **`sleep` rejects with `Canceled`, it does not resolve early.** A sleep that
   resolved on abort would tell its caller the wait completed, and the caller
   would proceed as if it had.
+- **Rule `M13`: a duration is measured on `elapsed()`, never on `now()`.**
+  [[breaker]], [[retry]] and anything else computing an interval are bound by
+  it. A cooldown built from wall-clock arithmetic holds a circuit open for an
+  hour after a one-second NTP correction, and closes one early after a jump
+  forward. The rule is enforced in `tests/rules/semantic-rules.ts`.
+- **`since` and `until` are free functions, not methods.** Every implementation
+  would compute them identically, and a default nobody varies is not part of a
+  contract.
 - **`Millis` is branded for one reason**: the most common time bug is a unit
   mix-up, and a number meaning seconds passed where milliseconds are expected is
   wrong by a factor of a thousand and typechecks perfectly. See [[brand]].

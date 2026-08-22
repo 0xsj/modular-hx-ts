@@ -57,7 +57,7 @@ its comment, so the citation appears in the failure message:
 The semantic rules, in `tests/rules/semantic-rules.ts` — claims about what the
 code does rather than what it imports, so they are parsed from the syntax tree:
 
-`M2` · `I5`
+`M2` · `M13` · `I5`
 
 `I5` cites the invariant rather than an `M` number. `../ENFORCEMENT.md` has a
 rule for the clock half of invariant I5 and none for the randomness half, and
