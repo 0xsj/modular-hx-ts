@@ -68,6 +68,16 @@ export interface RetryOptions {
   readonly signal?: AbortSignal;
 
   /**
+   * Override the wait for one failure.
+   *
+   * Exists for `Retry-After`: when a server states how long to wait, **it knows
+   * something the client does not** — how long the rate limit actually has left,
+   * or when the deploy finishes — and local backoff is a guess competing with a
+   * fact. Returning `undefined` falls back to the computed backoff.
+   */
+  readonly delayFor?: (error: AppError, attempt: number) => Millis | undefined;
+
+  /**
    * Called before each wait. The seam telemetry needs: L0 cannot log, and a
    * retry nobody can see is a latency spike nobody can explain.
    */
@@ -147,7 +157,9 @@ export function makeRetry(sleeper: Sleeper, random: Random): Retrier {
       const last = attempt >= policy.attempts;
       if (last || !worthRepeating(result.error)) return result;
 
-      const delay = backoffFor(attempt, policy, random);
+      const delay =
+        options.delayFor?.(result.error, attempt) ??
+        backoffFor(attempt, policy, random);
       options.onRetry?.({ attempt, delay, error: result.error });
 
       const waited = await attemptAsync(

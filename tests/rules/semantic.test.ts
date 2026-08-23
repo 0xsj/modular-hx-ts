@@ -22,6 +22,7 @@ const CASES: readonly (readonly [fixture: string, rule: string])[] = [
   ['i5-direct-entropy', 'I5'],
   ['m13-wall-clock-duration', 'M13'],
   ['m6-event-names-wrong-context', 'M6'],
+  ['m9-classification-assertion', 'M9'],
 ];
 
 describe('semantic rules', () => {

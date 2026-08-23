@@ -4,10 +4,11 @@
 # whole application with zero external dependencies. If a change makes them need
 # this file, the change is wrong. See ../INFRASTRUCTURE.md §1.
 #
-# Postgres alone, because Postgres is the only service a phase-1 module has a
-# contract suite to run against. Mailpit arrives with `mailer`; Jaeger and
-# Prometheus arrive with `telemetry`. A service nothing tests against is dead
-# weight (../INFRASTRUCTURE.md §3 rule 7).
+# Postgres and Mailpit, because those are the services a phase-1 module has a
+# contract suite to run against. Jaeger and Prometheus arrive with `telemetry`'s
+# exporters. A service nothing tests against is dead weight
+# (../INFRASTRUCTURE.md §3 rule 7), which is why Mailpit was absent until now
+# and arrives on the same change as the module that reads it.
 
 name: modular-hx-ts
 
@@ -79,6 +80,38 @@ services:
       - 'log_statement=all'
       - '-c'
       - 'log_connections=on'
+
+  mailpit:
+    # ../INFRASTRUCTURE.md §2.1. Pinned by tag, like everything else here: a
+    # blueprint that breaks because upstream moved is not a blueprint.
+    image: axllent/mailpit:v1.27
+    restart: unless-stopped
+
+    ports:
+      # ../PORTS.md is the authority. This repo's base is 15420; SMTP is offset
+      # +2 and the web UI is +3. Container ports are never namespaced.
+      - '${MAILPIT_SMTP_PORT:-15422}:1025'
+      - '${MAILPIT_UI_PORT:-15423}:8025'
+
+    environment:
+      # Everything is accepted and nothing is relayed. Mailpit is a sink, and a
+      # sink that could reach a real recipient is a footgun in a repo whose
+      # tests send mail on every run.
+      MP_SMTP_AUTH_ACCEPT_ANY: 1
+      MP_SMTP_AUTH_ALLOW_INSECURE: 1
+      # No volume: rung 2's mailbox is disposable by definition, and a
+      # persistent one would leak state between suites.
+      MP_MAX_MESSAGES: 5000
+
+    # `docker compose up --wait` blocks on this, exactly as it does for
+    # Postgres. Mailpit ships no shell utilities, so the probe is its own
+    # binary against its own readiness endpoint.
+    healthcheck:
+      test: ['CMD', '/mailpit', 'readyz']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 2s
 
 volumes:
   pgdata:

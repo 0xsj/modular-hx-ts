@@ -81,18 +81,45 @@ because the defect was in the clock.
 - **A dying connection emits twice**: the real cause first, then a code-less
   "Connection terminated unexpectedly". Keep the **first**; the second is its own
   consequence.
+- **A non-`async` function must `return Promise.reject(e)`, never `throw e`.**
+  This one shipped and was caught by a contract suite. Dropping `async` from
+  `mailer`'s memory adapter — to satisfy `require-await`, since it had nothing
+  to wait for — turned its validation failure into a **synchronous** throw,
+  while the SMTP adapter stayed `async` and rejected. A caller writing
+  `send(m).catch(...)` then works against one adapter and blows up against
+  another. If a function's return type says `Promise`, every failure path must
+  be a rejection.
+- **A pooled resource whose owner may die has to return itself.** A `pg` client
+  checked out for a session-scoped lock is released by its holder — but the
+  whole reason advisory locks were chosen is that a holder can *die*, and then
+  nobody calls release. The client stays checked out and `pool.end()` waits on
+  it forever. Surfaced as a **30-second teardown timeout**, long after the test
+  it belonged to had passed. The `error` handler now releases it, and `release`
+  is idempotent so a late caller is a no-op.
+- **`timer.unref()`** stops a `setTimeout` keeping the process alive. The jobs
+  scheduler unrefs every tick, because `lifecycle` owns the decision about when
+  the process may exit and a scheduler that held the loop open would make a
+  clean shutdown indistinguishable from a hang. It is the exact opposite of
+  what `handleSignals` needs.
 - **`process.env` values are `string | undefined`** and, under
   `noUncheckedIndexedAccess`, must be read with bracket access. Only the
   composition root and the test harness read it at all.
 - **An `unhandledRejection` warns and continues by default**, which is how a
   half-dead process keeps serving traffic. `main.ts` exits instead.
+- **`fetch` and `AbortSignal.timeout(ms)` are built in.** No client library is
+  needed to read Mailpit's API from the test harness, which is one dependency
+  that never had to be justified. `AbortSignal.timeout` is the readable spelling
+  of a bounded request; a `Promise.race` against a sleep leaks the timer.
 
 ## Used in
 
 - `src/shared/provenance/carrier.ts`
 - `src/shared/lifecycle/index.ts`
 - `src/shared/clock/index.ts`
+- `src/shared/postgres/pool.ts`
+- `src/shared/jobs/scheduler.ts`
 - `tests/testx/global-setup.ts`
+- `tests/testx/mailpit.ts`
 
 ## Related
 

@@ -33,7 +33,7 @@ export interface Violation {
 }
 
 /** The M rules this file enforces. One half of D5's loop. */
-export const SEMANTIC_RULES = ['M2', 'I5', 'M13', 'M6'] as const;
+export const SEMANTIC_RULES = ['M2', 'I5', 'M13', 'M6', 'M9'] as const;
 
 function sourceFiles(root: string) {
   const project = new Project({
@@ -257,11 +257,66 @@ export function m6EventNamesMatchTheirContext(root: string): Violation[] {
   return violations;
 }
 
+/**
+ * M9 — every classified field carries a tag.
+ *
+ * `../ENFORCEMENT.md`: *a field carrying personal or secret data has a
+ * `classification` tag.* **Exempt until `classification` ships. Then no
+ * exemptions.** It has shipped, so this is live.
+ *
+ * **Most of M9 is enforced by the type system rather than here.**
+ * `classify<T>` takes a `Record<keyof T, Level>`, so adding a field to a type
+ * and forgetting to classify it does not compile. Decorators would have been
+ * the other idiomatic option and `erasableSyntaxOnly` forbids them, which
+ * turned out to be the better constraint.
+ *
+ * What a type cannot catch is somebody **defeating** the exhaustive record —
+ * `as`, `as unknown as`, `Partial<...>`, or a spread that fills the gap with a
+ * default. Each one silently reintroduces the unlabelled field, and each one
+ * looks deliberate in a diff. That is what this rule detects.
+ *
+ * It lands with **no contexts in the repository**, so it checks an empty set
+ * today. That is the phase-0 principle, and the last moment it is free.
+ */
+export function m9ClassifiedFieldsAreTagged(root: string): Violation[] {
+  const violations: Violation[] = [];
+
+  for (const file of sourceFiles(root)) {
+    const rel = relative(root, file.getFilePath()).split(sep).join('/');
+    // The module that defines the mechanism is not subject to it.
+    if (rel.startsWith('src/shared/classification/')) continue;
+
+    for (const call of file.getDescendantsOfKind(SyntaxKind.CallExpression)) {
+      if (call.getExpression().getText() !== 'classify') continue;
+
+      const argument = call.getArguments()[1];
+      if (argument === undefined) continue;
+
+      const text = argument.getText();
+      const defeats =
+        argument.getKind() === SyntaxKind.AsExpression ||
+        argument.getKind() === SyntaxKind.TypeAssertionExpression ||
+        /\bas\s+(unknown|never|any|Partial|Record)\b/.test(text) ||
+        text.includes('...');
+
+      if (defeats) {
+        violations.push({
+          rule: 'M9',
+          message: `${rel}:${String(call.getStartLineNumber())} defeats the exhaustive classification record — every field carries a tag, and an assertion or a spread is how one stops (M9)`,
+        });
+      }
+    }
+  }
+
+  return violations;
+}
+
 export function allSemanticRules(root: string): Violation[] {
   return [
     ...m2TimeIsInjected(root),
     ...i5RandomnessIsInjected(root),
     ...m13DurationsAreMonotonic(root),
     ...m6EventNamesMatchTheirContext(root),
+    ...m9ClassifiedFieldsAreTagged(root),
   ];
 }

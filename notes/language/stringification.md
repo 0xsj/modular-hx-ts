@@ -86,6 +86,13 @@ confirmed rather than assumed.
 - **A raw control byte in a source file makes it binary.** Not stringification,
   but the same family: TypeScript parses a literal `NUL` happily, and `file(1)`
   then reports `data` while `grep` skips the file entirely. Write the escape.
+  **This happened twice** — once in the digest test, and again a week later in
+  `mailer`'s control-character regex, the module whose entire subject is control
+  characters. `tests/rules/encoding.test.ts` now fails the build on either.
+- **Writing a control character *into a test* needs `String.fromCharCode`.**
+  `mailer`'s injection cases build `CR` and `LF` that way rather than embedding
+  them, so the test asserting that a newline is rejected does not itself contain
+  the newline that would make the file unreadable to every text tool.
 
 ## Used in
 

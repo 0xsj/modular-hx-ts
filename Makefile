@@ -31,10 +31,14 @@ PG_PORT     ?= 15420
 PG_USER     ?= app
 PG_PASSWORD ?= app
 PG_DB       ?= app
+# ../PORTS.md offsets +2 and +3 for this repository's 15420 base.
+MAILPIT_SMTP_PORT ?= 15422
+MAILPIT_UI_PORT   ?= 15423
 
 DATABASE_URL ?= postgres://$(PG_USER):$(PG_PASSWORD)@localhost:$(PG_PORT)/$(PG_DB)?sslmode=disable
 
 export PG_PORT PG_USER PG_PASSWORD PG_DB DATABASE_URL
+export MAILPIT_SMTP_PORT MAILPIT_UI_PORT
 
 .PHONY: help
 help: ## List targets
@@ -160,6 +164,15 @@ db-reset: ## Recreate Postgres and DESTROY its data
 	$(DC) rm -sf postgres
 	docker volume rm -f $(PROJECT)_pgdata
 	$(DC) up -d --wait postgres
+
+.PHONY: mail-up
+mail-up: ## Mailpit only — SMTP sink plus a web UI to read it
+	$(DC) up -d --wait mailpit
+	@echo "mailpit UI: http://localhost:$(MAILPIT_UI_PORT)"
+
+.PHONY: mail-down
+mail-down: ## Stop Mailpit, keeping the rest of the stack
+	$(DC) stop mailpit
 
 .PHONY: psql
 psql: ## Interactive psql against the local database

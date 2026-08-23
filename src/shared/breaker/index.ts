@@ -62,6 +62,19 @@ export interface StateChange {
   readonly total: number;
 }
 
+/**
+ * Was this failure the circuit refusing, rather than the dependency failing?
+ *
+ * A caller retrying on `Unavailable` needs to tell the two apart: retrying
+ * against an open circuit consumes attempts and reaches nothing, which is the
+ * opposite of what opening it was for.
+ */
+export function isCircuitRejection(error: unknown): boolean {
+  const details = (error as { details?: Record<string, unknown> } | null)
+    ?.details;
+  return details?.['circuit'] === 'open' || details?.['circuit'] === 'probing';
+}
+
 export interface Snapshot {
   readonly state: BreakerState;
   readonly failures: number;
@@ -212,7 +225,16 @@ export function makeBreaker(
 
       if (entry.state === 'open') {
         if (clock.elapsed() - entry.openedAt < policy.resetAfter) {
-          return err(unavailable(`${describe}: circuit open for ${key}`));
+          // `details.circuit` rather than a message a caller has to match on.
+          // A rejection from an open circuit is `Unavailable`, which
+          // `isRetryable` reports true for — so without a structural marker a
+          // retry loop burns every attempt against a circuit that is refusing
+          // precisely to stop that. `httpclient` reads this.
+          return err(
+            unavailable(`${describe}: circuit open for ${key}`, {
+              details: { circuit: 'open', key },
+            }),
+          );
         }
         transition(key, entry, 'half_open');
       }
@@ -222,7 +244,11 @@ export function makeBreaker(
         // single question; letting the whole fleet through re-creates the load
         // that opened the circuit.
         if (entry.probeInFlight) {
-          return err(unavailable(`${describe}: circuit probing for ${key}`));
+          return err(
+            unavailable(`${describe}: circuit probing for ${key}`, {
+              details: { circuit: 'probing', key },
+            }),
+          );
         }
         entry.probeInFlight = true;
       }

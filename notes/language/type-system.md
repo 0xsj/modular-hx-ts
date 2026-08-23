@@ -97,6 +97,28 @@ type Result<T, E = AppError> =
 case is handled before `.value` is reachable. Go's `(T, error)` needs discipline
 to check; this needs none.
 
+### `satisfies` checks a shape without widening it
+
+```ts
+return { name, release } satisfies Lease;
+```
+
+`: Lease` would widen the value to `Lease` and lose whatever else it knows;
+`as Lease` asserts and checks nothing. `satisfies` verifies the object conforms
+and keeps the inferred type — which is what a factory returning a port
+implementation wants, and what `lock`'s leases and `events`' subscriptions use.
+
+### `Assert<T extends true>` turns a claim into a build failure
+
+Covered above for `Transactor`, and worth naming as a general device: any
+question expressible as a conditional type becomes a compile-time test at zero
+runtime cost.
+
+The pattern that makes it *fail* is the constraint, not the alias — `Assert<T
+extends true>` errors on `false` with `Type 'false' does not satisfy the
+constraint 'true'`, whereas a bare `type X = C extends D ? true : false` computes
+`false` quietly and nothing notices.
+
 ### `#private` is real; `private` is a suggestion
 
 `private` is a **type-level** annotation, erased at runtime and reachable from

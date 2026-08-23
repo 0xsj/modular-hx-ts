@@ -71,6 +71,19 @@ probe, for instance. `describe.skipIf` then skips with the reason in the title.
 - **`it.each(objects)('$name', …)`** interpolates a property into the test name,
   which is what makes fifteen fixture vectors report individually rather than as
   one opaque case.
+- **A lint rule sometimes forbids the thing under test.** `no-control-regex`
+  objects to the pattern that *is* `mailer`'s header-injection check, and
+  `only-throw-error` objects to the non-Error throw that `events` has to
+  tolerate. Both are disabled on one line with the reason, because a rule that
+  quietly prevents a security test from being written is worse than an
+  exception somebody can read.
+- **`require-await` will push you into a real bug.** Removing `async` from a
+  function with nothing to await changes a `throw` from a rejection into a
+  synchronous throw. Return `Promise.reject` instead — see [[runtime]].
+- **The test harness grows a file per service, not a redesign.** `testx` gained
+  `mailpit.ts` beside `postgres.ts` when `mailer` landed, plus a reachability
+  probe so the suite skips rather than fails. That shape was chosen before there
+  was a second service, which is the only time it is cheap to choose.
 
 ## Used in
 

@@ -48,6 +48,7 @@ import {
   load,
   oneOf,
   optional,
+  sensitive,
   text,
   url,
   type Config,
@@ -175,6 +176,21 @@ export const SCHEMA = {
     fallback: 'none',
   }),
   databaseUrl: optional(url('DATABASE_URL')),
+
+  // `mailer`. The password is a `sensitive` reader, so it arrives as a `Secret`
+  // that cannot print itself, and `secrets` has already resolved a
+  // `file://` or `env://` reference before `load` ever sees the value —
+  // `SMTP_PASSWORD=file:///run/secrets/smtp#password` needs no code here.
+  mailProvider: oneOf('MAIL_PROVIDER', ['memory', 'smtp', 'none'], {
+    fallback: 'memory',
+  }),
+  smtpHost: text('SMTP_HOST', { fallback: '127.0.0.1' }),
+  // ../PORTS.md offset +2 for this repository's 15420 base.
+  smtpPort: integer('SMTP_PORT', { fallback: 15422, min: 1, max: 65535 }),
+  smtpUsername: optional(text('SMTP_USERNAME')),
+  smtpPassword: optional(sensitive('SMTP_PASSWORD')),
+  smtpSecure: flag('SMTP_SECURE', { fallback: false }),
+  mailFrom: text('MAIL_FROM', { fallback: 'noreply@example.com' }),
 } as const;
 
 type AppConfig = Config<typeof SCHEMA>;
