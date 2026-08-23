@@ -1,6 +1,11 @@
 # ADR 0006 — The `Kind` vocabulary is ten values, not eight
 
-**Status:** Proposed · **Date:** 2026-08-22
+**Status:** Superseded · **Date:** 2026-08-22
+
+> Superseded by collection decision 0010, which makes the vocabulary eleven.
+> The body below is left exactly as written (`D3`): it was right about the gap
+> and right to escalate rather than decide locally, and it could not have known
+> about the third value. See ADR 0010 in `../decisions/`.
 
 ## Context
 

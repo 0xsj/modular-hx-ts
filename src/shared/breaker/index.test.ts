@@ -2,8 +2,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { fakeClock, millis, seconds, type FakeClock } from '../clock/index.js';
 import {
   type AppError,
+  canceled,
   forbidden,
   Kind,
+  timeout,
   unavailable,
 } from '../errors/index.js';
 import { isErr, isOk } from '../result/index.js';
@@ -62,6 +64,31 @@ describe('closed', () => {
     await drive(breaker, 'api', repeat(4, fail(DOWN)));
 
     expect(breaker.snapshot('api').state).toBe('open');
+  });
+
+  it('counts a TIMEOUT toward opening, because that is what a sick service does', async () => {
+    // **Decision 0010's first branch, here.** A dependency that stops answering
+    // is the textbook case for a circuit — and once `timeout` is its own `Kind`
+    // rather than folded into `unavailable`, whether it counts is a decision
+    // somebody has to make rather than one that happens.
+    const breaker = makeBreaker(fakeClock(), POLICY);
+
+    await drive(breaker, 'api', repeat(4, fail(timeout('deadline exceeded'))));
+
+    expect(breaker.snapshot('api').state).toBe('open');
+  });
+
+  it('does NOT count a cancellation, so client disconnects cannot trip it', async () => {
+    // **The expensive one to get wrong.** A caller leaving says nothing about
+    // the health of the dependency, so counting it means a wave of client
+    // disconnects — a mobile network dropping, a load balancer draining, a
+    // browser tab closing — opens a circuit on a service that was never
+    // unhealthy, and the outage is then entirely self-inflicted.
+    const breaker = makeBreaker(fakeClock(), POLICY);
+
+    await drive(breaker, 'api', repeat(10, fail(canceled('client hung up'))));
+
+    expect(breaker.snapshot('api').state).toBe('closed');
   });
 
   it('trips on a flapping dependency, which a consecutive counter never would', async () => {

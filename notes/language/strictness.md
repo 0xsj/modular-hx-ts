@@ -22,13 +22,25 @@ flag put it there.
 
 ### `erasableSyntaxOnly` — the file must be valid JavaScript with the types deleted
 
-No `enum`, no parameter properties (`constructor(private x)`), no `namespace`.
-All three emit runtime code, so a type-stripping loader cannot handle them.
+No `enum`, no parameter properties (`constructor(private x)`), no `namespace`,
+**and no decorators**. Every one of them emits runtime code, so a type-stripping
+loader cannot handle them.
 
 This is what makes `tsx` and Node's own type stripping work without a build
 step, which is what `make dev` depends on. It also pushed `Kind` and `ActorKind`
 into the const-object shape, which turned out better than `enum` regardless —
 see [[type-system]].
+
+**The decorator ban decided a design, and improved it.** `classification` needed
+a way to attach a sensitivity level to a field, and a decorator is what most
+TypeScript codebases would reach for. Forbidden here, so the declaration became
+`Record<keyof T, Level>` — which is **strictly better for this purpose**,
+because a decorator is opt-in *per field* while an exhaustive record is opt-out
+per field. A field somebody forgot to decorate is silently unclassified; a field
+missing from the record does not compile.
+
+Worth recording as a constraint that improved the design, rather than being
+remembered as something worked around.
 
 ### `verbatimModuleSyntax` — an import either exists at runtime or it does not
 
@@ -94,12 +106,16 @@ has had to remember the rule.
 - **Two TypeScripts are installed**, and only one of them typechecks. See
   [[tooling]] — a construct valid in 7 and unparseable in 6 would pass
   `make typecheck` and break `make lint`.
+- **A `Record<keyof T, X>` is the erasable answer to a decorator**, and the
+  better one. See above; it is how `classification` declares levels and how
+  `M9` became a compile error rather than only a lint.
 
 ## Used in
 
 - `tsconfig.json`
 - `src/shared/postgres/db.ts`
 - `src/shared/provenance/actor.ts`
+- `src/shared/classification/registry.ts`
 
 Every module, in practice — these flags are why several idioms here look the way
 they do.

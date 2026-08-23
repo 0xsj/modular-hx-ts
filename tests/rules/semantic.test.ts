@@ -23,6 +23,8 @@ const CASES: readonly (readonly [fixture: string, rule: string])[] = [
   ['m13-wall-clock-duration', 'M13'],
   ['m6-event-names-wrong-context', 'M6'],
   ['m9-classification-assertion', 'M9'],
+  ['m4-command-without-subject', 'M4'],
+  ['m3-query-without-tenant', 'M3'],
 ];
 
 describe('semantic rules', () => {

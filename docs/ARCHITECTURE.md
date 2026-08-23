@@ -56,9 +56,9 @@ and flagged in review, never by a test.
 | --- | --- | --- |
 | **L0** kernel | Pure. No I/O, no process state. Runs with no fixtures and no infrastructure | `errors` · `result` · `brand` · `assert` · `clock` · `id` · `random` · `retry` · `breaker` · `digest` · `pagination` · `buildinfo` · `redact` |
 | **L1** runtime | Describes this process, not the domain | `provenance` · `logger` · `env` · `secrets` · `lifecycle` · `health` · `telemetry` |
-| **L2** substrate | I/O. Port + memory adapter + real adapter + one contract suite both pass | **`postgres`** · *(pending: `events` · `jobs` · `lock` · `mailer` · `httpclient`)* |
-| **L3** capability | Makes a real decision, knows no domain | *(pending: `authz` · `tenant` · `crypto` · `classification` · `flags`)* |
-| **L4** edge | Speaks a wire protocol | *(pending: `httpx` · `idempotency` · `ratelimit` · `conditional` · `openapi`)* |
+| **L2** substrate | I/O. Port + memory adapter + real adapter + one contract suite both pass | `postgres` · `events` · `jobs` · `lock` · `mailer` · `httpclient` |
+| **L3** capability | Makes a real decision, knows no domain | `authz` · `tenant` · `crypto` · `classification` · `flags` |
+| **L4** edge | Speaks a wire protocol | **`edge`** · `httpx` · `idempotency` · *(pending: `ratelimit` · `conditional` · `openapi`)* |
 | **L5** | Composition root — the only place that knows concrete types | `src/main.ts` |
 
 ### `postgres` is the L2 exception, and the only one
@@ -83,6 +83,28 @@ Two interfaces do the swapping and `postgres` is neither:
 
 The transaction travels **in the signature**, not on the ambient context —
 ADR 0008, and a deliberate fork from siblings that chose the other shape.
+
+### `edge` is the floor of L4, and carries the layer's name
+
+`../ARCHITECTURE.md` §L4 names it. The chain vocabulary — the handler and
+middleware types, and eventually the response writer that records whether it has
+been committed — sits **below** the rest of L4: `httpx` assembles the chain,
+`idempotency` and `ratelimit` and `conditional` are positions in it, and every
+one of them needs the types to be written at all.
+
+Same shape as `errors` under L0, and the name follows the same rule: it is the
+layer's vocabulary, so it carries the layer's name.
+
+**The reason it is framework-neutral is specific to this blueprint.** Two
+servers — `node:http` and Fastify — run the same chain behind one port, and the
+adapter suite runs every case through both and compares the two answers to each
+other. A chain written against either framework's request type could not do
+that.
+
+The ordering is enforced by convention rather than by the cruiser: `S1` cannot
+tell a floor import from a peer import, because both are same-layer. What the
+floor buys is that the peer import nobody should make — `idempotency` → `httpx`
+— is now visibly different from the one everybody makes.
 
 ### `testx` is not a module and has no layer
 

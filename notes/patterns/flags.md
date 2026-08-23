@@ -1,0 +1,209 @@
+---
+module: flags
+layer: L3
+---
+
+# Flags
+
+## What
+
+```
+enabled(key, scope) -> bool
+variant(key, scope) -> string
+decide(key, scope)  -> { value, status, rule }
+```
+
+Three providers behind one contract: `static`, `file`, `postgres`.
+
+## Why
+
+### The line between a flag and config
+
+**Config is read once at boot and changing it needs a restart. A flag is read
+per request and changes without one.**
+
+That difference is the entire justification for the module. If a value never
+needs to change while the process runs, it belongs in `env` and not here — and
+putting it here buys nothing while costing a lookup, a provider, a cache, a TTL
+and a second place to look when behaviour surprises somebody.
+
+It is worth applying as a test when adding one: *would flipping this require a
+deploy anyway?* If yes, it is config.
+
+### Unknown keys are off, and reported as unknown
+
+**A typo must disable a feature, never enable one.** That is the direction that
+fails safe: a feature that silently stays off is a bug report, and a feature
+that silently turns on is an incident.
+
+But off-because-unknown and off-because-decided are different facts, so
+`status` distinguishes them:
+
+| status | meaning |
+| --- | --- |
+| `matched` | a rule applied, and `rule` names it |
+| `fallback` | the flag exists and nothing matched |
+| `unknown` | **no such flag** |
+
+Without that, a misspelled key looks exactly like somebody's deliberate `off`,
+and the misspelling survives review. `explain()` returns the whole set for a
+scope, which is where an operator sees it.
+
+### Rules, not a DSL
+
+A rule is a set of selectors **ANDed** together, with a value. First match wins,
+in order.
+
+**The temptation is an expression language.** The cost is that nobody can reason
+about what is enabled for whom — and a flag nobody can reason about is worse
+than a deploy, because a deploy is at least reviewable and reversible by a
+mechanism everybody already understands. An expression language also needs a
+parser, an evaluator, a syntax error path, and a way to test all three.
+
+If a rule needs boolean logic beyond AND, **that is two rules**. `a AND (b OR
+c)` flattens to two rules with the same value, in order, and the flattening is
+the feature: the list reads top to bottom.
+
+An **absent selector is not a wildcard** — it is a dimension the rule does not
+care about. Both readings give the same behaviour and only one of them makes an
+empty rule match everything, which is what it should do.
+
+### Sticky cohorts — the one function that is not this repo's to decide
+
+**A 10% rollout must mean the same 10% in every blueprint.** This is the only
+function in the collection where all of them must agree *numerically*: if Go and
+TypeScript disagree, the same user is inside the cohort in one and outside it in
+the other, and the resulting bug report makes no sense.
+
+The form is fixed by **collection decision [[0009-cohort-separator-and-width]]**:
+
+```
+bucket(key, subject) = be_uint32( sha256(key + U+001F + subject)[0..4) ) % 10000
+```
+
+**The separator is the one value here that can never be revised.** Changing it
+after a rollout is live **reassigns every bucket** — the 10% cohort becomes a
+*different* 10%, mid-experiment, and there is no migration for that. Today it
+costs one constant; after launch the cost is unbounded. That is why the choice
+was worth a collection decision rather than a per-repo preference, and why this
+note records the decision rather than arguing the case again.
+
+The rest follows from it:
+
+- **U+001F cannot occur in a flag key or a subject**, so the concatenation is
+  unambiguous **by construction** and there is no rejection rule. A `":"`
+  separator needs one — and `provenance.Actor.String()` is `"kind:id"`, so under
+  `":"` the most natural call site, bucketing on the acting user, is rejected on
+  *every request* while `flags` fails closed and the flag silently never
+  evaluates for anybody.
+- **uint32 from four bytes**, exact in JavaScript where a uint64 needs `BigInt`.
+- **Key first**, so one subject lands in a different bucket per flag rather than
+  becoming a permanent unlucky decile who are in every experiment at once.
+- **Nothing counts characters.** `'😀'.length` is 2 in TypeScript and 1 in Python
+  and Go, so a length prefix would disagree on the astral case.
+- **0 and 100 are decided without hashing**, so no rounding puts anybody the
+  wrong side of either boundary.
+
+### How this repo got it wrong, which is the part worth keeping
+
+This module shipped with `":"` **and a rejection rule**, and a note arguing for
+both. It also shipped 21 locally-generated vectors carrying an honest warning
+that they proved only that the code agreed with itself.
+
+The warning was right and insufficient. **Two forms had been implemented
+independently, differing on two axes — separator and width — and no set of
+vectors crossed the boundary between them.** Every implementation passed its own
+suite, which is exactly what a suite proves when its fixtures were generated by
+the code under test.
+
+That is the shape worth remembering, and it does not depend on who chose what:
+**a local fixture cannot detect a disagreement it was generated from.** The full
+history, including which form each repository held, belongs to
+[[0009-cohort-separator-and-width]] — the level at which the divergence actually
+existed.
+
+The local candidate is deleted. The test now reads
+`../conformance/fixtures/vectors/flag-cohort.json` **in place** — the same
+discipline `digest` uses, and for the same reason. Three of its eleven cases are
+regressions rather than coverage: two subjects containing `":"` that must bucket
+rather than reject, and `("ab", "c")` against `("a", "b")`, which are both
+`"abc"` with no separator.
+
+The fixture carries **no `input` field**: the string contains a raw `0x1f`, which
+is invisible in a committed text file and gets mangled by editors, so the input
+is constructed from `flag` and `subject`.
+
+### Serve stale, refresh behind
+
+A flag check is on the hot path and **must never wait on a database**. A request
+that blocks on a flag lookup has made the flag *worse than a restart*, which is
+the one thing this module exists to be better than.
+
+So `get` is synchronous and always answers from cache. Past the TTL it starts a
+refresh and returns the old value anyway.
+
+**The consequence shapes every test: the first read after a write is expected to
+be stale.** A test that writes a flag and immediately asserts it must **retry
+rather than sleep** — sleeping picks a number and hopes, retrying asserts the
+thing actually promised, which is *eventually, within the TTL*, and fails fast
+when it is broken.
+
+A failed refresh keeps the last good set. A database blip, or a malformed edit
+to the file, must not turn every flag off — that is the failure that makes
+people stop trusting the provider and go back to deploys.
+
+### Every evaluation lands on the span
+
+Key, value, status, and which rule matched. **A flag decision that is invisible
+is a debugging session where nobody can explain the behaviour** — and the
+unknown-key case is the one where it matters most, because that is the
+misspelling nobody has spotted yet.
+
+## Example
+
+```ts
+const flags = makeFlags({ source: staticSource(FLAGS), telemetry });
+
+// Tenant and actor come from the ambient carrier — flags is an observer.
+if (flags.enabled('checkout.new_flow')) { … }
+
+// Anything else is explicit.
+flags.variant('search.ranking', { attributes: { plan: 'pro' } });
+```
+
+## Gotchas
+
+- **A subject-less scope is excluded from every cohort**, not included. An
+  anonymous caller must not silently join a rollout.
+- **There is no rejection rule, and adding one back would be a regression.**
+  U+001F makes the encoding unambiguous by construction; a subject containing
+  `":"` — which every `Actor.String()` does — must bucket.
+- **`subject` defaults to the actor** and may be overridden — a device id for an
+  anonymous visitor — but it must be *stable for that subject*, or the cohort is
+  a coin flip per request.
+- **A wider rollout never drops somebody.** Monotonicity is tested, because a
+  10% → 20% rollout that took the feature away from an existing user would be a
+  worse bug than the rollout not working.
+- **The percentage selector is evaluated last** among selectors, since it is the
+  only one that hashes — a rule excluded on tenant never pays for it.
+- **`static` is the right answer more often than it looks.** It cannot be stale,
+  cannot fail, and is reviewable in the same diff as the code it guards.
+- **A malformed row or file is rejected as a set**, not partially applied. Half
+  a flag set is harder to reason about than none, and `validate` reports every
+  problem at once.
+
+## Used in
+
+- `src/shared/flags/index.ts`
+
+This list grows to `httpx` (a debug endpoint over `explain`) and to any context
+guarding a rollout.
+
+## Related
+
+[[digest]] — the same `sha256`, the same discipline about cross-language
+bytes, and the same habit of reading the collection's fixture in place rather
+than copying it. [[numbers]] — why the bucket is a `uint32` rather than a 64-bit value.
+[[provenance]] — read ambient, because this is an observer. [[telemetry]] — the
+span every decision lands on. [[env]] — where a value belongs when it does not
+need to change at runtime. [[postgres]] — the fleet-wide provider's TTL cache.

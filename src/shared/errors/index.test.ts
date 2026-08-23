@@ -2,19 +2,23 @@ import { describe, expect, it } from 'vitest';
 import {
   AppError,
   chain,
+  canceled,
   conflict,
   forbidden,
   hasKind,
+  internal,
   invalid,
   isAppError,
   isKind,
   isRetryable,
+  isServerFault,
   Kind,
   kindOf,
   notFound,
   rootCause,
   timeout,
   unavailable,
+  unprocessable,
   wrap,
   type FieldIssue,
 } from './index.js';
@@ -27,6 +31,29 @@ const issues: readonly FieldIssue[] = [
 ];
 
 describe('Kind', () => {
+  it('is decision 0010`s eleven, plus the one this repo proposes', () => {
+    // **The pin conformance case 50 needs.** `err_kind` is one of these or the
+    // profile is filtering a vocabulary that does not exist. Written out rather
+    // than derived from `Kind` itself, because a test that reads the value it
+    // is checking asserts nothing.
+    expect(Object.values(Kind).sort()).toEqual(
+      [
+        'invalid',
+        'unprocessable',
+        'unauthenticated',
+        'forbidden',
+        'not_found',
+        'conflict',
+        'precondition_failed',
+        'exhausted',
+        'unavailable',
+        'timeout',
+        'canceled',
+        'internal',
+      ].sort(),
+    );
+  });
+
   it('narrows a string that names a kind', () => {
     expect(isKind('not_found')).toBe(true);
   });
@@ -112,6 +139,32 @@ describe('kindOf', () => {
     expect(hasKind(forbidden('not yours'), Kind.Forbidden)).toBe(true);
     expect(hasKind(forbidden('not yours'), Kind.NotFound)).toBe(false);
     expect(hasKind('a thrown string', Kind.Internal)).toBe(true);
+  });
+});
+
+describe('isServerFault', () => {
+  it('is true for the failures that are ours', () => {
+    expect(isServerFault(internal('nil dereference'))).toBe(true);
+    expect(isServerFault(unavailable('connection refused'))).toBe(true);
+    expect(isServerFault(timeout('deadline exceeded'))).toBe(true);
+    // An unclassified throw is `Internal`, and an unclassified throw is a bug.
+    expect(isServerFault(new TypeError('x is not a function'))).toBe(true);
+  });
+
+  it('is false for the failures that are the caller`s', () => {
+    expect(isServerFault(invalid('not JSON'))).toBe(false);
+    expect(isServerFault(unprocessable('the key was used differently'))).toBe(
+      false,
+    );
+    expect(isServerFault(notFound('no such user'))).toBe(false);
+    expect(isServerFault(conflict('version 7, expected 6'))).toBe(false);
+  });
+
+  it('is false for a cancellation, which is nobody`s fault', () => {
+    // The caller going away says nothing about our health or their request.
+    // `idempotency` must not release a key on it, and `breaker` must not count
+    // it — see decision 0010.
+    expect(isServerFault(canceled('client hung up'))).toBe(false);
   });
 });
 

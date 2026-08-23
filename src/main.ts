@@ -191,6 +191,12 @@ export const SCHEMA = {
   smtpPassword: optional(sensitive('SMTP_PASSWORD')),
   smtpSecure: flag('SMTP_SECURE', { fallback: false }),
   mailFrom: text('MAIL_FROM', { fallback: 'noreply@example.com' }),
+
+  // `crypto`. A JSON keyset, and a secret reference works unchanged:
+  // `CRYPTO_KEYS=file:///run/secrets/keys` is a mounted Kubernetes secret that
+  // `secrets` resolves before this schema ever sees it. Absent means the
+  // ephemeral dev ring, which warns at startup.
+  cryptoKeys: optional(sensitive('CRYPTO_KEYS')),
 } as const;
 
 type AppConfig = Config<typeof SCHEMA>;

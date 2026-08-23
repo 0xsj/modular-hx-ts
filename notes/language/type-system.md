@@ -119,6 +119,56 @@ extends true>` errors on `false` with `Type 'false' does not satisfy the
 constraint 'true'`, whereas a bare `type X = C extends D ? true : false` computes
 `false` quietly and nothing notices.
 
+### `Record<keyof T, X>` makes an omission a compile error
+
+The device L3 is built on, twice:
+
+```ts
+classify<User>('identity.User', { id: …, email: …, passwordHash: … });
+//              ^ Record<keyof User, Level> — omitting a field does not compile
+
+const deleteUser: Command<{ id: string }, void> = (subject, input) => …;
+//                        ^ the subject is in the signature, so it cannot be dropped
+```
+
+Both are **rules stated in a type rather than checked by a lint pass**. Adding a
+field to `User` and forgetting to classify it is a build failure; declaring a
+command without a `Subject` is a build failure.
+
+That is the shape worth copying: state the requirement in the type, then let the
+AST rule cover only the ways a type gets *defeated* — an `as`, a `Partial<…>`, a
+spread that fills the gap. Rules `M9` and `M4` are each half a type and half a
+rule for exactly that reason.
+
+**A `Record` is opt-out per field; a decorator is opt-in per field.** That
+asymmetry is why the exhaustive record is the better instrument for anything
+security-shaped, and it fell out of a constraint rather than a preference — see
+[[strictness]].
+
+### `@ts-expect-error` turns "this must not compile" into a test
+
+```ts
+// @ts-expect-error a command declared this way cannot omit its subject
+const broken: Command<{ id: string }, void> = (input) => …;
+```
+
+It fails if the line *does* compile, so the negative is pinned rather than
+assumed. Without it, "the type prevents this" is a claim in a comment.
+
+### A type predicate can narrow the negative branch to `never`
+
+```ts
+type Action = string;
+function isAction(v: string): v is Action { … }   // wrong
+```
+
+`Action` **is** `string`, so the predicate claims a distinction the type does
+not make — and the `else` branch narrows to `never`. In `authz` that meant the
+validation message could not name the value it had just rejected.
+
+A predicate is only worth writing when the type genuinely differs. Otherwise
+return a plain `boolean`; the compiler is right to complain.
+
 ### `#private` is real; `private` is a suggestion
 
 `private` is a **type-level** annotation, erased at runtime and reachable from
@@ -158,11 +208,15 @@ excluded from hashed bytes. Neither is achievable with default marshalling.
 - `src/shared/result/index.ts`
 - `src/shared/provenance/actor.ts`
 - `src/shared/postgres/pool.ts`
+- `src/shared/classification/registry.ts`
+- `src/shared/authz/subject.ts`
 
 ## Related
 
 [[brand]] — the module. [[result]] and [[errors]] — the discriminated union and
 the closed `Kind`. [[redact]] — where `#private` is a security control rather
 than a style. [[strictness]] — the compiler flags that force several of these
-shapes. [[provenance]] — private fields plus explicit `toJSON`, for the parity
+shapes, including the one that ruled out decorators. [[classification]] and
+[[authz]] — where the exhaustive record and the signature-carried parameter each
+turn a rule into a build failure. [[provenance]] — private fields plus explicit `toJSON`, for the parity
 reason.

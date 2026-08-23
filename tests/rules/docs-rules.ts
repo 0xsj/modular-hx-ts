@@ -178,20 +178,97 @@ export function n3NoteSections(root: string): Violation[] {
   });
 }
 
-/** N4 — every wikilink resolves, or is declared a forward link. */
+/**
+ * N4 — every wikilink resolves, or is declared a forward link.
+ *
+ * A link resolves against three places, **in this order**: `notes/**`, then
+ * `docs/decisions/`, then the collection's `decisions/`. First match wins.
+ *
+ * **A link resolves by existing.** A citation of a decision that was renamed, or
+ * never written, still fails — that is the property the rule is for.
+ *
+ * **A bare four-digit link never resolves.** Local ADRs and collection decisions
+ * are four digits in the same sequence, so once a repo has a handful of its own,
+ * most collection numbers name a local document too — `[[0009]]` is then
+ * ambiguous to a reader and silently resolvable to the wrong document by a
+ * checker that searches one directory before the other. `D7` applied to
+ * wikilinks: cite the full slug, which cannot collide.
+ */
 export function n4LinksResolve(root: string): Violation[] {
   const all = notes(root);
-  const known = new Set(all.map((n) => n.rel.replace(/^.*\/|\.md$/g, '')));
   const forward = read(join(root, 'notes', 'FORWARD.md')) ?? '';
+
+  const basenames = (dir: string): Set<string> =>
+    new Set(
+      existsSync(dir)
+        ? readdirSync(dir)
+            .filter((f) => f.endsWith('.md'))
+            .map((f) => f.slice(0, -'.md'.length))
+        : [],
+    );
+
+  const noteNames = new Set(all.map((n) => n.rel.replace(/^.*\/|\.md$/g, '')));
+  const localDir = join(root, 'docs', 'decisions');
+  const collectionDir = join(root, '..', 'decisions');
+
+  const local = basenames(localDir);
+  const collection = basenames(collectionDir);
+
+  // **Not optional, and attached to the link rather than the tree.** A check
+  // that passes a decision link when the collection directory is missing turns
+  // the rule off the day this repo is published standalone — precisely when it
+  // stops having a sibling to check against and needs the rule most. On
+  // publication the root documents are vendored into `docs/`, so the local
+  // directory carries both.
+  //
+  // Reported per unresolved link, not as a tree-level failure: a repo that
+  // cites no decisions has nothing to resolve, and failing it would make a rule
+  // about links fire on a tree that has none.
+  const noDecisionsAnywhere =
+    !existsSync(localDir) && !existsSync(collectionDir);
 
   return all.flatMap((note) =>
     [...note.body.matchAll(/\[\[([^\]]+)\]\]/g)]
       .map((m) => (m[1] ?? '').trim())
-      .filter((link) => !known.has(link) && !forward.includes(`[[${link}]]`))
-      .map((link) => ({
-        rule: 'N4',
-        message: `${note.rel} links to [[${link}]], which does not exist and is not in notes/FORWARD.md (N4)`,
-      })),
+      .flatMap((link) => {
+        if (forward.includes(`[[${link}]]`)) return [];
+
+        // A bare number is refused before anything is looked up, so it cannot
+        // resolve by luck in whichever directory happens to be searched first.
+        if (/^\d{4}$/.test(link)) {
+          return [
+            {
+              rule: 'N4',
+              message: `${note.rel} cites [[${link}]] by number — decisions are cited by full slug, because the number names a local ADR too (N4)`,
+            },
+          ];
+        }
+
+        // With full slugs a link cannot match in two places, so this tie-break
+        // should never fire. If it does, one document has been duplicated —
+        // worth failing on rather than silently preferring a directory.
+        if (local.has(link) && collection.has(link)) {
+          return [
+            {
+              rule: 'N4',
+              message: `${note.rel} cites [[${link}]], which exists as both a local ADR and a collection decision — one is a duplicate (N4)`,
+            },
+          ];
+        }
+
+        if (noteNames.has(link) || local.has(link) || collection.has(link)) {
+          return [];
+        }
+
+        return [
+          {
+            rule: 'N4',
+            message: noDecisionsAnywhere
+              ? `${note.rel} cites [[${link}]], and neither docs/decisions/ nor ../decisions/ exists, so no decision link can resolve (N4)`
+              : `${note.rel} cites [[${link}]], which is not a note, a local ADR, a collection decision, or a declared forward link (N4)`,
+          },
+        ];
+      }),
   );
 }
 

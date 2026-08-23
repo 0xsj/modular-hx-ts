@@ -8,6 +8,7 @@ import {
 } from '../clock/index.js';
 import {
   type AppError,
+  canceled,
   conflict,
   forbidden,
   Kind,
@@ -201,6 +202,41 @@ describe('kind awareness', () => {
     await retry(operation, 'rename user', { policy: FAST });
 
     expect(calls()).toBe(1);
+  });
+
+  it('repeats a TIMEOUT, which is the one that separates it from a refusal', async () => {
+    // **Decision 0010's first branch.** Folded into `unavailable` this passes
+    // by accident; as its own `Kind` it has to be decided. A deadline that
+    // fired says the work did not finish in time, and a second attempt against
+    // a dependency that has since recovered is repair rather than noise.
+    const clock = fakeClock();
+    const retry = makeRetry(clock, fakeRandom(1));
+    const { operation, calls } = flaky(
+      2,
+      timeout('deadline exceeded after 5s'),
+    );
+
+    const running = retry(operation, 'load user', { policy: FAST });
+    await clock.advance(seconds(30));
+
+    expect(isOk(await running)).toBe(true);
+    expect(calls()).toBe(3);
+  });
+
+  it('does NOT repeat a cancellation, because the caller has already gone', async () => {
+    // **Decision 0010's second branch, and the one that costs if it is wrong.**
+    // Retrying spends work on somebody who is no longer listening — and under
+    // a wave of client disconnects it spends it once per attempt, per
+    // disconnect, at exactly the moment the fleet can least afford it.
+    const clock = fakeClock();
+    const retry = makeRetry(clock, fakeRandom(1));
+    const { operation, calls } = flaky(99, canceled('client hung up'));
+
+    const result = await retry(operation, 'load user', { policy: FAST });
+
+    expect(isErr(result) && result.error.kind).toBe(Kind.Canceled);
+    expect(calls()).toBe(1);
+    expect(clock.elapsed()).toBe(0);
   });
 
   it('honours a custom predicate', async () => {

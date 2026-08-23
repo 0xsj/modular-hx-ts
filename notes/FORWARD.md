@@ -11,6 +11,4 @@ telling you something — either the module is overdue, or the link was wishful.
 
 | Link | Will be | Why it is linked already |
 | --- | --- | --- |
-| [[crypto]] | `notes/patterns/crypto.md` | L3. The keyring; uses `random` for key material and nonces |
-| [[httpx]] | `notes/patterns/httpx.md` | L4. Owns the `Kind` → status table, per invariant I7 |
 | [[validate]] | — | **Will not land.** `../MODULES.md` lists it for Go; here zod covers the boundary. Kept declared so the link in `notes/patterns/result.md` stays honest |

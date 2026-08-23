@@ -18,12 +18,37 @@
  * erasable, and `erasableSyntaxOnly` keeps the program identical for tsc,
  * esbuild and `node --experimental-strip-types`.
  *
- * Adding a kind is a real decision. Every edge that maps kinds to a protocol
- * gains a case, and forgetting one is how a new failure silently becomes a 500.
+ * Adding a kind is a real decision, and not one a repository takes alone: the
+ * set is collection-wide, because a dashboard filtering `err_kind` across
+ * blueprints is filtering one vocabulary or none. **Eleven values, fixed by
+ * collection decision 0010** — see `docs/decisions/0006-kind-vocabulary-is-ten.md`,
+ * which this repository raised and which 0010 supersedes in the direction it
+ * argued.
+ *
+ * **Twelve here, and the twelfth is a proposal rather than a local decision.**
+ * `precondition_failed` is needed by conformance case 29, which requires 412
+ * against a case 3 table that has none — the same contradiction 0010 resolved
+ * for 422. See `docs/decisions/0011-precondition-failed-kind.md`, which takes
+ * the posture ADR 0006 took and 0010 rewarded: implement, mark `Proposed`,
+ * escalate.
+ *
+ * Every edge that maps kinds to a protocol gains a case, and forgetting one is
+ * how a new failure silently becomes a 500. That totality is the whole reason
+ * this is a `Kind` rather than a status carried on the error.
  */
 export const Kind = {
-  /** Input failed validation. The caller can fix it. */
+  /** The request could not be **understood**. Malformed, unparseable, absent. */
   Invalid: 'invalid',
+  /**
+   * Understood, and refused.
+   *
+   * The distinction HTTP draws between 400 and 422, and it is a real one: if
+   * you are reaching for `Invalid` and the request parsed fine, this is the one
+   * you want. The type specimen is conformance case 26 — an idempotency key and
+   * a payload that are each perfectly well-formed, and it is their disagreement
+   * that cannot be acted on.
+   */
+  Unprocessable: 'unprocessable',
   /** No credentials, or credentials that do not identify anyone. */
   Unauthenticated: 'unauthenticated',
   /** Identified, but not permitted. Distinct from Unauthenticated on purpose. */
@@ -32,6 +57,17 @@ export const Kind = {
   NotFound: 'not_found',
   /** The state moved: a version mismatch, a uniqueness violation. */
   Conflict: 'conflict',
+  /**
+   * A validator the caller supplied no longer describes the current state.
+   *
+   * Distinct from `Conflict`, and the distinction is worth keeping: a conflict
+   * is *the state moved and your write cannot be applied*; this is *you told me
+   * what you expected to find, and it is not what is here*. The caller's next
+   * move differs — re-read and re-decide, rather than retry.
+   *
+   * **Proposed, not settled.** See ADR 0011.
+   */
+  PreconditionFailed: 'precondition_failed',
   /** A limit was reached — rate limit, quota, budget. */
   Exhausted: 'exhausted',
   /** A dependency is down or degraded. Nothing is wrong with the request. */
@@ -123,10 +159,12 @@ const constructorFor =
   (message: string, options: AppErrorOptions = {}): AppError =>
     new AppError(kind, message, options);
 
+export const unprocessable = constructorFor(Kind.Unprocessable);
 export const unauthenticated = constructorFor(Kind.Unauthenticated);
 export const forbidden = constructorFor(Kind.Forbidden);
 export const notFound = constructorFor(Kind.NotFound);
 export const conflict = constructorFor(Kind.Conflict);
+export const preconditionFailed = constructorFor(Kind.PreconditionFailed);
 export const exhausted = constructorFor(Kind.Exhausted);
 export const unavailable = constructorFor(Kind.Unavailable);
 export const timeout = constructorFor(Kind.Timeout);
@@ -165,6 +203,25 @@ export function hasKind(error: unknown, kind: Kind): boolean {
 export function isRetryable(error: unknown): boolean {
   const kind = kindOf(error);
   return kind === Kind.Unavailable || kind === Kind.Timeout;
+}
+
+/**
+ * Whether the failure is **ours** rather than the caller's.
+ *
+ * Decided here for the same reason `isRetryable` is: two modules that each
+ * invent it drift, and this one is read by `idempotency` to choose between
+ * releasing a key and holding it. Kept as a predicate over `Kind` rather than a
+ * comparison against a status code, because `errors` is L0 and the moment the
+ * kernel knows what 500 is, the kernel knows about HTTP (invariant `I7`).
+ *
+ * `Canceled` is deliberately absent: the caller going away is neither our fault
+ * nor theirs, and nothing downstream should treat it as either.
+ */
+export function isServerFault(error: unknown): boolean {
+  const kind = kindOf(error);
+  return (
+    kind === Kind.Internal || kind === Kind.Unavailable || kind === Kind.Timeout
+  );
 }
 
 /**

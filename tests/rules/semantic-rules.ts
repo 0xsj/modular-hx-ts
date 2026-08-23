@@ -33,7 +33,15 @@ export interface Violation {
 }
 
 /** The M rules this file enforces. One half of D5's loop. */
-export const SEMANTIC_RULES = ['M2', 'I5', 'M13', 'M6', 'M9'] as const;
+export const SEMANTIC_RULES = [
+  'M2',
+  'I5',
+  'M13',
+  'M6',
+  'M9',
+  'M4',
+  'M3',
+] as const;
 
 function sourceFiles(root: string) {
   const project = new Project({
@@ -311,6 +319,105 @@ export function m9ClassifiedFieldsAreTagged(root: string): Violation[] {
   return violations;
 }
 
+/**
+ * M4 — authorization is explicit.
+ *
+ * `../ENFORCEMENT.md`: *every mutating use case takes a `Subject` parameter.
+ * Detect — exported functions in `app/command/` accept a subject type.*
+ *
+ * **This is the rule the whole module exists to make enforceable.** A `Subject`
+ * is a decision input, and an ambient one makes the forgotten check
+ * indistinguishable from the passed one — same signature, same call site, no
+ * diff. Requiring it in the signature is what turns "somebody remembered" into
+ * something a machine can check.
+ *
+ * Commands only. A query that forgets its subject leaks; a command that forgets
+ * it *acts*, and `../ARCHITECTURE.md` Part II §3 rule 6 scopes the requirement
+ * to the mutating side. Queries are covered by `tenant`'s fence when it lands.
+ *
+ * Lands with **no use cases in the repository**, so it asserts nothing today
+ * and needs no allowlist. That window closes when `identity` arrives, which is
+ * two phases away.
+ */
+export function m4AuthorizationIsExplicit(root: string): Violation[] {
+  const violations: Violation[] = [];
+
+  for (const file of sourceFiles(root)) {
+    const rel = relative(root, file.getFilePath()).split(sep).join('/');
+    if (!/^src\/contexts\/[^/]+\/app\/command\//.test(rel)) continue;
+    if (/\.(test|contract|testkit)\.ts$/.test(rel)) continue;
+
+    for (const fn of file.getFunctions()) {
+      if (!fn.isExported()) continue;
+
+      const takesSubject = fn
+        .getParameters()
+        .some((parameter) => /\bSubject\b/.test(parameter.getType().getText()));
+
+      if (!takesSubject) {
+        violations.push({
+          rule: 'M4',
+          message: `${rel}:${String(fn.getStartLineNumber())} exports ${fn.getName() ?? 'a command'} without a Subject parameter — authorization is explicit, never ambient (M4)`,
+        });
+      }
+    }
+  }
+
+  return violations;
+}
+
+/**
+ * M3 — every query is tenant-scoped.
+ *
+ * `../ENFORCEMENT.md`: *a repository query filters by the request's tenant.
+ * Detect — every SQL statement in a context adapter references the tenant
+ * column, **or** the file carries a justified `nolint:tenant` marker naming
+ * why.* And the reason it is a rule rather than a convention: **the violation
+ * does not error, it returns other people's data.**
+ *
+ * Scoped to `src/contexts/<ctx>/infra/postgres/`. Shared adapters are not
+ * context repositories — `tenant`'s own registry is the obvious case, and it
+ * is *about* tenants rather than scoped by one.
+ *
+ * Statements that cannot be tenant-scoped are real: a `create table`, a
+ * `select 1` health probe. They carry the marker with a reason, which is a
+ * reviewable line in a diff rather than a silent omission.
+ *
+ * Lands with **no repositories in the repository**, so it asserts nothing today
+ * and needs no allowlist. It stops asserting nothing when `identity` arrives.
+ */
+export function m3QueriesAreTenantScoped(root: string): Violation[] {
+  const violations: Violation[] = [];
+  const READS = /\b(select|update|delete)\b/i;
+
+  for (const file of sourceFiles(root)) {
+    const rel = relative(root, file.getFilePath()).split(sep).join('/');
+    if (!/^src\/contexts\/[^/]+\/infra\/postgres\//.test(rel)) continue;
+    if (/\.(test|contract|testkit)\.ts$/.test(rel)) continue;
+
+    const source = file.getFullText();
+    // One justified marker exempts the file, and names why in the same line.
+    if (/nolint:tenant\s+\S/.test(source)) continue;
+
+    for (const literal of [
+      ...file.getDescendantsOfKind(SyntaxKind.StringLiteral),
+      ...file.getDescendantsOfKind(SyntaxKind.NoSubstitutionTemplateLiteral),
+      ...file.getDescendantsOfKind(SyntaxKind.TemplateExpression),
+    ]) {
+      const sql = literal.getText();
+      if (!READS.test(sql)) continue;
+      if (/\btenant\b/i.test(sql)) continue;
+
+      violations.push({
+        rule: 'M3',
+        message: `${rel}:${String(literal.getStartLineNumber())} has a statement that does not filter by tenant — the violation returns other people's data rather than an error (M3)`,
+      });
+    }
+  }
+
+  return violations;
+}
+
 export function allSemanticRules(root: string): Violation[] {
   return [
     ...m2TimeIsInjected(root),
@@ -318,5 +425,7 @@ export function allSemanticRules(root: string): Violation[] {
     ...m13DurationsAreMonotonic(root),
     ...m6EventNamesMatchTheirContext(root),
     ...m9ClassifiedFieldsAreTagged(root),
+    ...m4AuthorizationIsExplicit(root),
+    ...m3QueriesAreTenantScoped(root),
   ];
 }

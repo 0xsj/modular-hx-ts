@@ -34,6 +34,7 @@
     "vitest": "4.1.11"
   },
   "dependencies": {
+    "fastify": "^5.12.1",
     "nodemailer": "^9.0.5",
     "pg": "^8.23.0"
   }

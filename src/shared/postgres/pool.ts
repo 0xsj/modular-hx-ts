@@ -15,6 +15,7 @@
 
 import pg from 'pg';
 import { AppError, internal } from '../errors/index.js';
+import { Carrier } from '../provenance/index.js';
 import { type Config, dsnWithGuardrails, guardrails } from './config.js';
 import { type DB, type Row } from './db.js';
 import { asAppError } from './sqlstate.js';
@@ -163,6 +164,25 @@ export function connect(config: Config): Postgres {
 
       try {
         await client.query('BEGIN');
+
+        // **Set even though nothing reads it yet.** It is what makes PostgreSQL
+        // row-level security available later without a second pass over every
+        // adapter — an RLS policy reads `current_setting('app.tenant_id')`, and
+        // retrofitting the `SET` means touching every transaction in the
+        // codebase at the moment the policy is added.
+        //
+        // `SET LOCAL`, so it is transaction-scoped and cannot leak onto a
+        // pooled connection. Absent when there is no ambient provenance — a
+        // migration or a boot job — which is correct: those are not tenant
+        // work, and an empty string would look like a tenant named "".
+        const tenant = Carrier.current()?.tenant;
+        if (tenant !== undefined) {
+          await client.query('SELECT set_config($1, $2, true)', [
+            'app.tenant_id',
+            tenant,
+          ]);
+        }
+
         const result = await fn(dbOver(client));
         await client.query('COMMIT');
         return result;

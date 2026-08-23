@@ -65,7 +65,21 @@ const LAYERS = [
     id: 'L4',
     name: 'edge',
     intent: 'Speaks a wire protocol.',
-    modules: ['httpx', 'idempotency', 'ratelimit', 'conditional', 'openapi'],
+    // `edge` first, and first on purpose: it is the **floor of L4**
+    // (ARCHITECTURE.md §L4, which names it) — the handler and middleware types
+    // every other member needs in order to be written at all. It carries the
+    // layer's own name because it is the layer's vocabulary, the same
+    // relationship `errors` has to L0. Enforced the same way as that one: by
+    // ordering and review rather than by the cruiser, because both are
+    // same-layer imports.
+    modules: [
+      'edge',
+      'httpx',
+      'idempotency',
+      'ratelimit',
+      'conditional',
+      'openapi',
+    ],
   },
 ];
 
