@@ -36,7 +36,7 @@
     "sourceMap": true
   },
 
-  "include": ["src", "tests", "vitest.config.ts", "eslint.config.ts"],
+  "include": ["src", "tests", "tools", "vitest.config.ts", "eslint.config.ts"],
 
   // These trees import modules that do not exist and violate the architecture
   // on purpose. tests/rules/arch.test.ts cruises them; tsc must not.

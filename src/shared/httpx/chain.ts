@@ -114,7 +114,7 @@ export function chain(options: ChainOptions, handler: Handler): Handler {
   const order: readonly Middleware[] = [
     provenance(origins, clock, budget),
     accessLog(clock, telemetry, options.reporter),
-    problemMapper(),
+    problemMapper(options.reporter),
     recover(),
     options.deadline ?? passThrough, // 5
     authn(options.authenticate),
@@ -248,8 +248,18 @@ function accessLog(
  *
  * A handler that writes its own problem response is a bug the chain should make
  * impossible: everything below throws, and only this line renders.
+ *
+ * **It also reports what it hid.** A 500's `detail` is deliberately generic —
+ * *The request could not be completed.* — because the cause may name a table, a
+ * column or a constraint, and none of that is the client's. Which left the
+ * cause nowhere at all: the access log carries `err_kind: internal` and the
+ * body carries a sentence, and the `TypeError` that started it was discarded.
+ *
+ * That was found by asking a running process to register a user against a
+ * database that was missing a table. Every unit test was green, and the only
+ * evidence of the failure anywhere in the system was the number 500.
  */
-function problemMapper(): Middleware {
+function problemMapper(reporter?: Reporter): Middleware {
   return async (exchange, next) => {
     try {
       return await next(exchange);
@@ -272,6 +282,19 @@ function problemMapper(): Middleware {
       }
 
       const problem = problemFor(error, exchange.provenance.requestId);
+
+      // **5xx only.** A 404 or a 401 is the system working, and reporting it at
+      // `error` would train whoever reads the log to stop reading it. A 5xx is
+      // the system failing, and its cause is the one thing nobody can recover
+      // from anywhere else.
+      if (problem.status >= 500) {
+        reporter?.error('the request failed', {
+          method: exchange.request.method,
+          path: exchange.request.path,
+          status: problem.status,
+          err: error,
+        });
+      }
 
       return {
         status: problem.status,

@@ -3,8 +3,11 @@
  *
  * One source of truth, read by two independent enforcers:
  *   - `.dependency-cruiser.cjs` turns it into the S1 and S10 import rules
- *   - the docs test checks every module note names the same layer (N7), and
- *     that no module on disk is missing from it
+ *   - the docs test checks every module note names the same layer (N7)
+ *   - the arch test checks this map is **total** — every module under
+ *     `src/shared/` has a row. This header used to claim the docs test did
+ *     that; it did not, and a module missing from here is not un-ordered but
+ *     *unchecked*: it appears in no S1 rule and passes in silence.
  *
  * Build order is layer order, and a module imports only from strictly lower
  * layers. Same-layer imports are allowed and flagged in review, never by a test.
@@ -75,6 +78,11 @@ const LAYERS = [
     modules: [
       'edge',
       'httpx',
+      // `httproute` above `edge`: it speaks HTTP, holds no policy, and every
+      // context's transport uses it. Shared rather than copied, because `S6`
+      // makes a context's registry unreachable from the next one and copying
+      // defeats the single registry `openapi` has to walk.
+      'httproute',
       'idempotency',
       'ratelimit',
       'conditional',

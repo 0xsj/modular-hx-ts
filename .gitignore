@@ -27,6 +27,11 @@ Thumbs.db
 .vscode/
 .eslintcache
 
+# What `make e2e` writes: a journal of every exchange the journey made. It is
+# meant to be read after a run, not committed — every id and timestamp in it
+# changes on every run, so a committed copy is a diff nobody can review.
+artifacts/
+
 # Local working files — not part of the published blueprint
 CLAUDE.md
 STATUS.md

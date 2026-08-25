@@ -78,9 +78,29 @@ export interface Events extends Publisher, Subscriber {
   readonly dispatcher: Dispatcher;
 }
 
-/** Whether a subscription pattern selects an event name. */
+/**
+ * Whether a subscription pattern selects an event name.
+ *
+ * Three forms, and the third was added by the first subscriber that needed it:
+ *
+ * - an **exact name** — `identity.user.registered`;
+ * - a **prefix** — `identity.*`, where the dot is the boundary, so
+ *   `identityx.user.x` does not match;
+ * - **`*`**, every event from every context.
+ *
+ * **`*` exists because `audit` cannot be written without it.**
+ * `../../../CONTEXTS.md` §3: it subscribes to *every* context's domain events.
+ * The alternative is one subscription per context, and the failure mode of that
+ * is a list somebody forgets to extend — after which the next context's events
+ * are simply absent from the audit log, and nothing reports a gap in a record
+ * that is supposed to be the evidence.
+ */
 export function matches(pattern: string, name: string): boolean {
+  if (pattern === EVERYTHING) return true;
   if (pattern === name) return true;
   if (!pattern.endsWith('.*')) return false;
   return name.startsWith(pattern.slice(0, -1));
 }
+
+/** Every event, from every context. */
+export const EVERYTHING = '*';

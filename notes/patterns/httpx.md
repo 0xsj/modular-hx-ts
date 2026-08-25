@@ -191,6 +191,42 @@ await server.start();
 
 ## Gotchas
 
+**The problem `type` is a named slug, not the `Kind` in kebab.** It was the
+kind, which reads as a tidy one-to-one mapping and is a lossy one:
+`CONFORMANCE.md` §3.5's catalogue is deliberately *finer* than `Kind`. A wrong
+password and a missing header are both `Unauthenticated`; a client branching on
+`type` — which RFC 9457 makes the stable identifier — has to tell them apart,
+and the status cannot.
+
+So an `AppError` may carry a `problem` slug and the mapper prefers it, falling
+back to the kind's own name kebab-cased. `I7` is unchanged: the *rendering* is
+still transport's and only transport's. What moved is that the failure gets to
+name itself, which is the part a status was never able to do.
+
+Two of them are deliberately **not** distinguished, and both are enumeration
+oracles if they are: a wrong password and an unknown address are one
+`invalid-credentials`, and every way a session stops working is one
+`session-revoked`. The catalogue names `token-expired` separately; telling a
+caller which would leak whether the token was ever real, and their next action
+is identical either way.
+
+**A 500's cause has to be logged, because the body deliberately does not carry
+it.** The problem mapper renders *The request could not be completed.* for an
+internal error, and that is right: the cause may name a table, a column or a
+constraint, and none of that is the client's business. Which left the cause
+nowhere at all — the access log carried `err_kind: internal`, the body carried a
+sentence, and the `TypeError` that started it was discarded.
+
+The comment in `recover` even claimed otherwise: *the log line still names the
+`TypeError` the client never sees*. It did not. Position 3 now reports the error
+with its cause, at `error` level, for **5xx only** — a 404 or a 401 is the system
+working, and reporting those at `error` trains whoever reads the log to stop
+reading it.
+
+Found by asking a running process to register a user against a database missing
+a table. Every unit test was green, and the only evidence of the failure
+anywhere in the system was the number 500.
+
 - **`Kind` → status lives in `problem.ts` and nowhere else.** The moment a
   second file knows what 409 is, there are two answers to what a conflict is.
 - **The table is `Record<Kind, number>`, so it is total by construction** —

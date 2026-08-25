@@ -12,6 +12,19 @@
  * private map and a shared adapter backed by a table agree on every case while
  * one of them is wrong.
  *
+ * **`at` is passed in, never read by the store.** `MODULES.md` §5 is explicit
+ * and the reason is this file's own contract suite: the memory twin and the
+ * shared adapter run the *same* cases, and a suite that advances a fake clock
+ * would move one and not the other. The shared adapter used the database's
+ * `now()` and the twin used an injected clock, so the two were driven by two
+ * clocks and the suite could only ever assert on the intersection — which is
+ * everything except refill, the one behaviour the bucket is.
+ *
+ * It is **wall time**, not a monotonic reading, and that is the narrow
+ * exception `M13` names: two replicas' monotonic origins are unrelated, so
+ * their readings cannot refill one shared bucket. Skew between replicas becomes
+ * a bounded inaccuracy instead of a correctness bug.
+ *
  * See `notes/patterns/ratelimit.md`.
  */
 
@@ -26,8 +39,14 @@ export interface Buckets {
    * as `idempotency`'s claim, and the same resolution — one round trip that
    * decides, never a read followed by a write.
    */
-  take(key: string, limit: Limit): Promise<Decision>;
+  take(key: string, limit: Limit, at: Date): Promise<Decision>;
 
-  /** Drop buckets that have been full long enough to be indistinguishable from absent. */
-  purge(idleFor: Limit): Promise<number>;
+  /**
+   * Drop buckets full long enough to be indistinguishable from absent.
+   *
+   * Takes the reading for the same reason `take` does: a store that consults
+   * its own clock in one method and not the other is a store the contract suite
+   * can only half drive.
+   */
+  purge(idleFor: Limit, at: Date): Promise<number>;
 }

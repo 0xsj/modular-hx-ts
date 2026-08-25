@@ -42,7 +42,11 @@ interface Row {
 /**
  * Refill, decide and write in one statement.
  *
- * `$1` key · `$2` capacity · `$3` tokens per millisecond.
+ * `$1` key · `$2` capacity · `$3` tokens per millisecond · `$4` **the reading**.
+ *
+ * `$4` was `now()`, and `MODULES.md` §5 forbids it: the store must not consult
+ * its own clock. The twin advances a fake clock and this advanced PostgreSQL's,
+ * so the one contract suite `I2` requires could assert on refill in neither.
  *
  * The refill expression appears twice — once in `set`, once in `where` — and
  * that duplication is deliberate rather than tidied into a lateral join: the
@@ -53,16 +57,16 @@ interface Row {
  */
 const refill = `least($2::float8,
     ${BUCKETS_TABLE}.tokens
-    + greatest(0, extract(epoch from (now() - ${BUCKETS_TABLE}.read_at)) * 1000)
+    + greatest(0, extract(epoch from ($4::timestamptz - ${BUCKETS_TABLE}.read_at)) * 1000)
       * $3::float8)`;
 
 const TAKE = `
   with taken as (
     insert into ${BUCKETS_TABLE} (key, tokens, read_at)
-    values ($1, $2::float8 - 1, now())
+    values ($1, $2::float8 - 1, $4::timestamptz)
     on conflict (key) do update
       set tokens  = ${refill} - 1,
-          read_at = now()
+          read_at = $4::timestamptz
       where ${refill} >= 1
     returning tokens, true as allowed
   )
@@ -71,7 +75,7 @@ const TAKE = `
   select
     least($2::float8,
       b.tokens
-      + greatest(0, extract(epoch from (now() - b.read_at)) * 1000) * $3::float8),
+      + greatest(0, extract(epoch from ($4::timestamptz - b.read_at)) * 1000) * $3::float8),
     false as allowed
     from ${BUCKETS_TABLE} b
    where b.key = $1 and not exists (select 1 from taken)
@@ -79,12 +83,16 @@ const TAKE = `
 
 export function postgresBuckets(db: DB): Buckets {
   return {
-    async take(key: string, limit: Limit): Promise<Decision> {
+    async take(key: string, limit: Limit, at: Date): Promise<Decision> {
       let row: Row | undefined;
       try {
         row =
-          (await db.queryRow<Row>(TAKE, [key, limit.limit, rate(limit)])) ??
-          undefined;
+          (await db.queryRow<Row>(TAKE, [
+            key,
+            limit.limit,
+            rate(limit),
+            at.toISOString(),
+          ])) ?? undefined;
       } catch (error) {
         // Surfaced with a `Kind` so the middleware can recognise a store
         // failure and degrade rather than guess from a driver error.
@@ -106,7 +114,7 @@ export function postgresBuckets(db: DB): Buckets {
       return decide(row.allowed, row.tokens, limit);
     },
 
-    async purge(idleFor: Limit): Promise<number> {
+    async purge(idleFor: Limit, at: Date): Promise<number> {
       try {
         // A full bucket is indistinguishable from an absent one, so this
         // changes no answer — it reclaims rows for keys nobody has used since
@@ -114,8 +122,8 @@ export function postgresBuckets(db: DB): Buckets {
         // because a bucket that was empty needs a whole window to get there.
         return await db.exec(
           `delete from ${BUCKETS_TABLE}
-            where extract(epoch from (now() - read_at)) * 1000 >= $1::float8`,
-          [idleFor.window],
+            where extract(epoch from ($2::timestamptz - read_at)) * 1000 >= $1::float8`,
+          [idleFor.window, at.toISOString()],
         );
       } catch (error) {
         throw asAppError(error, 'purge rate limit buckets');

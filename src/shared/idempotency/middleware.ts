@@ -58,6 +58,27 @@ export interface IdempotencyOptions {
   readonly anonymousCallers: 'refused' | 'permitted';
 
   /**
+   * Paths this middleware does not engage on.
+   *
+   * **The seam the composition root exposed.** `anonymousCallers: 'refused'`
+   * asserts that everything behind this position requires authentication, and
+   * that is false for any real process: one chain serves a login endpoint and a
+   * charge endpoint, and routing happens *below* position 9 so it cannot ask a
+   * route which it is.
+   *
+   * Without this, a client retrying **registration** with an `Idempotency-Key`
+   * — a perfectly reasonable thing to do — gets a 500, because the anonymous
+   * backstop fires on a route that is legitimately public.
+   *
+   * Listing them in the root is the honest short answer rather than the tidy
+   * one: the root is what knows both the chain and the routes. The tidy answer
+   * is for idempotency to be **declared per route**, the way `auth` is, which
+   * needs the registry to run it — and that inverts the chain order `httpx`
+   * specifies. Raised rather than resolved locally; see the note.
+   */
+  readonly exempt?: readonly string[];
+
+  /**
    * Where a fail-closed refusal is announced.
    *
    * Invariant `I9` requires the choice to be *logged when it fires*, not merely
@@ -106,11 +127,17 @@ export function idempotency(options: IdempotencyOptions): Middleware {
     }
   };
 
+  const exempt = new Set(options.exempt ?? []);
+
   return async (exchange: Exchange, next): Promise<Response> => {
     const { request } = exchange;
     const supplied = request.headers[KEY_HEADER];
 
-    if (supplied === undefined || SAFE.has(request.method.toUpperCase())) {
+    if (
+      supplied === undefined ||
+      SAFE.has(request.method.toUpperCase()) ||
+      exempt.has(request.path)
+    ) {
       return next(exchange);
     }
 
@@ -154,11 +181,17 @@ export function idempotency(options: IdempotencyOptions): Middleware {
         // identical one.
         throw unprocessable(
           'this Idempotency-Key was used with a different request',
+          // The catalogue names this one — `CONFORMANCE.md` §3.5. A client
+          // branching on `type` needs to tell it from a still-running claim,
+          // because one is worth retrying and the other never will be.
+          { problem: 'idempotency-mismatch' },
         );
 
       case 'in-flight':
         // Case 27. Bounded by the lease, never permanent — see `port.ts`.
-        throw conflict('a request with this Idempotency-Key is still running');
+        throw conflict('a request with this Idempotency-Key is still running', {
+          problem: 'idempotency-in-flight',
+        });
 
       case 'consumed':
         // Spent past the cap. **Definitive, not "come back later"**: the work

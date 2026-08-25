@@ -9,12 +9,16 @@
  * - **Check-and-consume under genuine concurrency.** Read-then-write passes
  *   every sequential case and admits more than the limit here.
  *
- * The waits are real. `now()` lives inside PostgreSQL, where no injected clock
- * reaches — so the windows are short and the suite waits rather than pretending.
+ * **Nothing here waits any more.** It used to: `now()` lived inside PostgreSQL,
+ * where no injected clock reached, so every refill case cost real seconds and
+ * was tight enough to flake on a loaded machine. `MODULES.md` §5 moved the
+ * reading into `take`, and time in this file is now an argument — which makes
+ * the cases exact rather than *long enough on this machine*, and lets the
+ * shared adapter and the memory twin run one suite on one clock.
  */
 
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
-import { millis, type Millis } from '../../../src/shared/clock/index.js';
+import { millis } from '../../../src/shared/clock/index.js';
 import { migrate } from '../../../src/shared/postgres/index.js';
 import {
   type Limit,
@@ -30,9 +34,6 @@ let schema: Schema;
 
 let counter = 0;
 const nextKey = (): string => `pg-${String(++counter)}`;
-
-const wait = (ms: number): Promise<void> =>
-  new Promise((resolve) => setTimeout(resolve, ms));
 
 integration('postgres rate limit buckets', () => {
   beforeAll(async () => {
@@ -53,12 +54,26 @@ integration('postgres rate limit buckets', () => {
       // adapter's time pass is to let time pass. Two seconds is wide enough
       // that a millisecond of query latency is noise against a 400ms token,
       // and narrow enough that the whole suite runs in seconds.
-      window: millis(2_000),
-      advance: (duration: Millis) => wait(duration),
+      // **Ten seconds, and the suite waits for none of it.** This was 2000ms
+      // with `advance: wait`, because the adapter read PostgreSQL's `now()` and
+      // the only way to move it was to sleep — so every refill case cost real
+      // seconds and was tight enough to flake on a loaded machine. The reading
+      // is a parameter now, so this window is the same one the memory twin
+      // uses and both are driven by one fake clock.
+      window: millis(10_000),
     }));
   });
 
   describe('what only a real database proves', () => {
+    // The reading every call here passes. **Real time is no longer the way to
+    // move a bucket**, so the cases that used to `wait()` step this instead —
+    // which also makes them exact rather than "long enough on this machine".
+    let instant = new Date('2026-02-02T00:00:00.000Z');
+    const now = (): Date => instant;
+    const step = (by: number): void => {
+      instant = new Date(instant.getTime() + by);
+    };
+
     it('admits exactly the limit when the whole burst races', async () => {
       // **The defect this port exists to prevent.** The pool hands each of
       // these its own connection, so they genuinely race — which is what the
@@ -68,7 +83,7 @@ integration('postgres rate limit buckets', () => {
       const key = nextKey();
 
       const outcomes = await Promise.all(
-        Array.from({ length: 40 }, () => buckets.take(key, limit)),
+        Array.from({ length: 40 }, () => buckets.take(key, limit, now())),
       );
 
       expect(outcomes.filter((o) => o.allowed)).toHaveLength(5);
@@ -85,25 +100,29 @@ integration('postgres rate limit buckets', () => {
 
       const outcomes = await Promise.all(
         replicas.flatMap((replica) =>
-          Array.from({ length: 5 }, () => replica.take(key, limit)),
+          Array.from({ length: 5 }, () => replica.take(key, limit, now())),
         ),
       );
 
       expect(outcomes.filter((o) => o.allowed)).toHaveLength(5);
     });
 
-    it('refills on the database`s clock, not on any process`s', async () => {
+    it('refills on the reading it is given, not on any clock of its own', async () => {
+      // **The rule this file used to break.** It was titled *refills on the
+      // database's clock* and it did — `MODULES.md` §5 forbids that, because
+      // the twin and this adapter then run one contract suite on two clocks
+      // and refill is the behaviour neither of them can assert.
       const buckets = postgresBuckets(schema.db);
       const limit: Limit = { limit: 4, window: millis(400) };
       const key = nextKey();
 
-      for (let i = 0; i < 4; i++) await buckets.take(key, limit);
-      expect((await buckets.take(key, limit)).allowed).toBe(false);
+      for (let i = 0; i < 4; i++) await buckets.take(key, limit, now());
+      expect((await buckets.take(key, limit, now())).allowed).toBe(false);
 
-      await wait(300);
+      step(300);
 
       // Two windows' worth of tokens have not accrued; some have.
-      expect((await buckets.take(key, limit)).allowed).toBe(true);
+      expect((await buckets.take(key, limit, now())).allowed).toBe(true);
     });
 
     it('stores fractional tokens, or a busy caller never refills', async () => {
@@ -117,9 +136,9 @@ integration('postgres rate limit buckets', () => {
 
       // Six first, so the bucket is nowhere near its cap: refilling into a
       // full bucket clamps to a whole number and would prove nothing.
-      for (let i = 0; i < 6; i++) await buckets.take(key, limit);
-      await wait(50);
-      await buckets.take(key, limit);
+      for (let i = 0; i < 6; i++) await buckets.take(key, limit, now());
+      step(50);
+      await buckets.take(key, limit, now());
 
       const row = await schema.db.queryRow<{ tokens: number }>(
         `select tokens from ${BUCKETS_TABLE} where key = $1`,
@@ -137,7 +156,7 @@ integration('postgres rate limit buckets', () => {
       const key = nextKey();
 
       await Promise.all(
-        Array.from({ length: 10 }, () => buckets.take(key, limit)),
+        Array.from({ length: 10 }, () => buckets.take(key, limit, now())),
       );
 
       const rows = await schema.db.query<{ n: string }>(
@@ -154,11 +173,11 @@ integration('postgres rate limit buckets', () => {
       const idle = nextKey();
       const busy = nextKey();
 
-      await buckets.take(idle, limit);
-      await wait(400);
-      await buckets.take(busy, limit);
+      await buckets.take(idle, limit, now());
+      step(400);
+      await buckets.take(busy, limit, now());
 
-      await buckets.purge(limit);
+      await buckets.purge(limit, now());
 
       const remaining = await schema.db.query<{ key: string }>(
         `select key from ${BUCKETS_TABLE} where key = any($1::text[])`,

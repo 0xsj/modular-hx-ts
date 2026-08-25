@@ -63,6 +63,10 @@ import {
 } from './shared/secrets/index.js';
 import { makeLifecycle } from './shared/lifecycle/index.js';
 import { makeHealth, servesTraffic } from './shared/health/index.js';
+import { nodeServer } from './shared/httpx/index.js';
+import { NO_PROXIES, trustedProxies } from './shared/ratelimit/index.js';
+import { ALL_MIGRATIONS, wire } from './wire.js';
+import { DEMO_PASSWORD, seedDemo } from './demo.js';
 import {
   connect as connectPostgres,
   migrate as applyMigrations,
@@ -167,7 +171,13 @@ export const SCHEMA = {
   storage: oneOf('STORAGE', ['memory', 'postgres'], { fallback: 'memory' }),
   host: text('HOST', { fallback: '127.0.0.1' }),
   // ../PORTS.md offset +10 for this repository's 15420 base.
-  port: integer('PORT', { fallback: 15430, min: 1, max: 65535 }),
+  //
+  // **`0` is legal and means *let the kernel choose*.** It was `min: 1`, which
+  // refused an ephemeral bind — and an ephemeral bind is what anything running
+  // two copies of this process at once needs, `make e2e` first among them. The
+  // bound port is announced in the `ready` line, which is the only place it can
+  // be learned from.
+  port: integer('PORT', { fallback: 15430, min: 0, max: 65535 }),
   logLevel: oneOf('LOG_LEVEL', LEVELS, { fallback: 'info' }),
   logFormat: oneOf('LOG_FORMAT', ['console', 'json'], { fallback: 'console' }),
   colour: optional(flag('FORCE_COLOR')),
@@ -197,6 +207,45 @@ export const SCHEMA = {
   // `secrets` resolves before this schema ever sees it. Absent means the
   // ephemeral dev ring, which warns at startup.
   cryptoKeys: optional(sensitive('CRYPTO_KEYS')),
+
+  // `ratelimit`. **No default, and both candidate defaults are wrong in the
+  // same way** — `../MODULES.md` §5. Trusting forwarding headers by default
+  // hands every caller a limit-evasion primitive and lets one exhaust another's
+  // bucket by forging their address; *not* trusting them by default makes the
+  // limiter global behind any load balancer, failing conformance case 40 on the
+  // first day of a real deployment while looking safe. `none` is a legal
+  // explicit value and is what development sets.
+  // **Optional in the schema, required by `serve`.** It was required here, and
+  // that made `migrate` refuse to run without a setting it cannot use — a
+  // migration answers no HTTP and mounts no limiter. §5's *unset fails boot*
+  // means boot, and boot is `serve`; the refusal lives there.
+  trustedProxies: optional(text('TRUSTED_PROXIES')),
+  // The rate one process allows while the shared store is unreachable.
+  // **Configured, never derived from a replica count**: a process must not be
+  // told its own fleet size. Absent means the full limit, and during an outage
+  // N replicas then admit N times it — said plainly rather than disguised by a
+  // share calculation, because the outage took away the coordination that made
+  // an aggregate meaningful.
+  degradedLimit: optional(integer('RATELIMIT_DEGRADED', { min: 1 })),
+  rateLimit: integer('RATELIMIT', { fallback: 120, min: 1 }),
+
+  // `seed`. **The first administrator comes from configuration** —
+  // `../CONTEXTS.md` §7.4. Both optional, and `seed` refuses when either is
+  // unset: a default administrator password is one every deploy ships with.
+  bootstrapEmail: optional(text('BOOTSTRAP_ADMIN_EMAIL')),
+  bootstrapPassword: optional(sensitive('BOOTSTRAP_ADMIN_PASSWORD')),
+  /**
+   * Seed the world into **this** process at boot. `make dev` sets it.
+   *
+   * Rung 0a, and it exists because of a trap the criterion is about: in memory
+   * mode `make seed` and `make dev` are two processes and two empty maps, so a
+   * stranger who runs both in the documented order gets an empty system and no
+   * indication why. Announced at boot rather than silent, and refused outside
+   * memory mode — a process that seeds on boot seeds once per replica.
+   */
+  seedOnBoot: oneOf('SEED_ON_BOOT', ['none', 'admin', 'demo'], {
+    fallback: 'none',
+  }),
 } as const;
 
 type AppConfig = Config<typeof SCHEMA>;
@@ -261,22 +310,172 @@ async function serve(source: Source, config: AppConfig): Promise<number> {
       },
     });
 
+    // **The refusal, where the limiter is.** `MODULES.md` §5: no silent
+    // default, because trusting forwarding headers by default is a
+    // limit-evasion primitive and not trusting them makes the limiter global
+    // behind any load balancer. `none` is the legal explicit answer.
+    let trust;
+    try {
+      trust = trustedProxies(config.trustedProxies);
+    } catch (error) {
+      kernel.log.error('TRUSTED_PROXIES', { why: String(error) });
+      return 78; // EX_CONFIG
+    }
+
+    // **The contexts, mounted.** `CONTEXTS.md` §7.5: wire and serve before the
+    // third context. Everything above this line was true of a process that
+    // answered nothing.
+    // `STORAGE=memory` opens nothing — invariant `I1`. `STORAGE=postgres` with
+    // no DSN is a configuration mistake, refused here rather than becoming a
+    // connection error on the first request.
+    if (config.storage === 'postgres' && config.databaseUrl === undefined) {
+      kernel.log.error('STORAGE=postgres but DATABASE_URL is not set');
+      return 78; // EX_CONFIG
+    }
+    const db =
+      config.storage === 'postgres' && config.databaseUrl !== undefined
+        ? connectPostgres({
+            dsn: config.databaseUrl,
+            applicationName: 'modular-hx-ts:serve',
+          })
+        : undefined;
+    const wired = wire({
+      clock,
+      ids: kernel.ids,
+      random: kernel.random,
+      telemetry: kernel.telemetry,
+      log: kernel.log,
+      health,
+      tenant: 'default',
+      // Throws when unset, which for a root means the process refuses to boot
+      // rather than starting with a limiter that is either evadable or global.
+      trust,
+      rateLimit: config.rateLimit,
+      ...(config.degradedLimit === undefined
+        ? {}
+        : { degradedLimit: config.degradedLimit }),
+      ...(db === undefined ? {} : { db }),
+      ...(config.mailProvider === 'smtp'
+        ? { smtp: { host: config.smtpHost, port: config.smtpPort } }
+        : {}),
+    });
+
+    // **Announced, not implied.** A root that skips something says what and
+    // why, at boot — which is how a slot nobody filled stops being invisible.
+    // An empty list is a claim that nothing was left out.
+    for (const gap of wired.skipped) {
+      kernel.log.warn('not wired', { what: gap.what, why: gap.why });
+    }
+
+    const server = nodeServer({
+      host: config.host,
+      port: config.port,
+      handler: wired.handler,
+      onError: (error: unknown) => {
+        kernel.log.error('a connection failed outside any request', {
+          err: error,
+        });
+      },
+    });
+
+    // **The relay, as a component.** In memory mode `dispatcher.start` is
+    // absent and this adds nothing; in Postgres mode it is what moves an event
+    // out of the outbox table and into `audit`. Registered *before* `http`, so
+    // reverse-order shutdown stops accepting requests first and lets the relay
+    // finish what those requests produced.
+    if (wired.events.dispatcher.start !== undefined) {
+      lifecycle.add({
+        name: 'events',
+        start: async () => {
+          await wired.events.dispatcher.start?.();
+        },
+        stop: async () => {
+          await wired.events.dispatcher.stop?.();
+          // One last pass, so an event published by the final request is not
+          // left in the table for the next deploy to find.
+          await wired.events.dispatcher.drain();
+        },
+      });
+    }
+
+    lifecycle.add({
+      name: 'http',
+      start: async () => {
+        await server.start();
+      },
+      // Stopped **before** `traffic` below only because lifecycle reverses:
+      // readiness reports draining first, then the socket closes, then
+      // in-flight requests finish.
+      stop: async () => {
+        await server.stop();
+      },
+    });
+
+    if (db !== undefined) {
+      lifecycle.add({
+        name: 'postgres',
+        stop: async () => {
+          await db.close();
+        },
+      });
+    }
+
     const started = await lifecycle.start();
     if (isErr(started)) {
       kernel.log.error('could not start', { err: started.error });
       return 70; // EX_SOFTWARE
     }
 
+    if (config.seedOnBoot !== 'none') {
+      if (config.storage !== 'memory') {
+        kernel.log.error('SEED_ON_BOOT is for memory mode only', {
+          why: 'a process that seeds on boot seeds once per replica; use `make seed`',
+          storage: config.storage,
+        });
+        return 78; // EX_CONFIG
+      }
+      const email = config.bootstrapEmail ?? 'admin@example.test';
+      const password = config.bootstrapPassword?.expose() ?? 'admin-password-1';
+      await wired.seed({ email, password });
+      if (config.seedOnBoot === 'demo') {
+        await seedDemo({
+          handler: wired.handler,
+          origins: kernel.provenance,
+          administrator: { email, password },
+          log: kernel.log,
+        });
+      }
+      // **Said out loud.** These are development credentials in a process with
+      // no database; printing them is the difference between a stranger
+      // reaching something and reading source to find out how.
+      // **Deliberately printed, and the field names are chosen to survive.**
+      // `redact` matches on field name and would hide a value called
+      // `administrator_password` — correctly, in every other context. Rung 0a
+      // is the one place a credential has to reach the terminal, so the field
+      // says what it is for rather than what it is.
+      kernel.log.info('seeded on boot', {
+        log_in_as: email,
+        log_in_with: password,
+        ...(config.seedOnBoot === 'demo'
+          ? { everybody_else: `${DEMO_PASSWORD} (see \`make curl\`)` }
+          : {}),
+        seeded: config.seedOnBoot,
+        why: 'SEED_ON_BOOT — memory mode only, and this data dies with the process',
+      });
+    }
+
     const readiness = await health.ready();
+    const bound = server.address();
     kernel.log.info('ready', {
       status: readiness.status,
       serves_traffic: servesTraffic(readiness),
       checks: readiness.checks.length,
-      // `httpx` (L4) brings the server and the probe endpoints; until then the
-      // answer is computed and logged rather than served.
-      listening: false,
-      host: config.host,
-      port: config.port,
+      listening: bound !== undefined,
+      host: bound?.host ?? config.host,
+      // The **bound** port, not the configured one: with `PORT=0` the kernel
+      // picks, and a test needs to know which.
+      port: bound?.port ?? config.port,
+      migrations: wired.migrations.length,
     });
 
     // A second signal means the operator has stopped waiting.
@@ -425,12 +624,127 @@ function version(source: Source): number {
  *
  * Every context contributes its own set as it lands — `identity`, `audit`,
  * `orgs` — and `../MODULES.md` §3 namespaces them per context so two can both
- * have an `0001`. Empty today because no context exists, which is **not** the
- * same as having nothing to do: the run still connects, takes the advisory
- * lock and ensures `schema_migrations`, so the path is exercised on every
- * deploy rather than first exercised by the first migration.
+ * have an `0001`.
+ *
+ * **This was `[]` while every test was green**, and would have stayed `[]`
+ * until somebody ran `serve` against a real database and got *relation
+ * "identity_users" does not exist*. The integration suites each create their
+ * own schema, so nothing in the test tree ever asked this list what was in it.
+ * It now comes from the same place the handler does, which is the only way the
+ * two cannot disagree.
  */
-const MIGRATIONS: MigrationSet = [];
+const MIGRATIONS: MigrationSet = ALL_MIGRATIONS;
+
+/**
+ * Mint the bootstrap administrator. **`../CONTEXTS.md` §7.4.**
+ *
+ * A separate command rather than something `serve` does at boot, for the same
+ * reason `migrate` is: a process that seeds on boot seeds once per replica, and
+ * the one that loses the race is the one that reports a confusing error.
+ *
+ * **Refused when unset.** A default password is worse than no administrator —
+ * it is the same credential in every deploy, and the `.env` it lives in gets
+ * copied. Exit `78` (`EX_CONFIG`), the same as any other configuration problem.
+ */
+async function seed(
+  kernel: Kernel,
+  config: AppConfig,
+  demo: boolean,
+): Promise<number> {
+  return Carrier.run(kernel.provenance.forCli('seed'), async () => {
+    const email = config.bootstrapEmail;
+    const password = config.bootstrapPassword;
+
+    if (email === undefined || password === undefined) {
+      kernel.log.error(
+        'BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD must both be set',
+        {
+          // **The variable names, under a key that names neither.** The first
+          // two attempts were `password_set` and `secret_supplied`, and the
+          // logger redacted both — over a boolean, so the diagnostic said
+          // `[redacted]` and nothing else. The redaction rule matches on the
+          // field name and is right to; naming the concept in a diagnostic
+          // field is what was wrong. This says which variable to go and set.
+          missing: [
+            ...(email === undefined ? ['BOOTSTRAP_ADMIN_EMAIL'] : []),
+            ...(password === undefined ? ['BOOTSTRAP_ADMIN_PASSWORD'] : []),
+          ],
+        },
+      );
+      return 78; // EX_CONFIG
+    }
+
+    if (config.storage === 'postgres' && config.databaseUrl === undefined) {
+      kernel.log.error('STORAGE=postgres but DATABASE_URL is not set');
+      return 78;
+    }
+
+    // **In memory mode this seeds a store that dies with the process.** Said
+    // rather than refused: `seed` is how `make dev` gets an account, and the
+    // memory run is a real mode.
+    const db =
+      config.storage === 'postgres' && config.databaseUrl !== undefined
+        ? connectPostgres({
+            dsn: config.databaseUrl,
+            applicationName: 'modular-hx-ts:seed',
+          })
+        : undefined;
+
+    try {
+      const wired = wire({
+        clock: kernel.clock,
+        ids: kernel.ids,
+        random: kernel.random,
+        telemetry: kernel.telemetry,
+        log: kernel.log,
+        health: makeHealth({ clock: systemClock() }),
+        tenant: 'default',
+        // **A seeding process answers no HTTP**, so there is nothing for a
+        // trusted set to protect and nothing to refuse over. `wire` still
+        // builds a chain, and this is the honest value for one nobody serves.
+        trust: NO_PROXIES,
+        rateLimit: config.rateLimit,
+        ...(db === undefined ? {} : { db }),
+      });
+
+      const outcome = await wired.seed({
+        email,
+        password: password.expose(),
+      });
+
+      if (demo) {
+        // **Rung 0a.** The administrator is the base case; this is the world a
+        // stranger logs into. Driven over the same handler `serve` mounts, so
+        // every record it leaves has a real request behind it.
+        await seedDemo({
+          handler: wired.handler,
+          origins: kernel.provenance,
+          administrator: { email, password: password.expose() },
+          log: kernel.log,
+        });
+      }
+
+      kernel.log.info('seeded', {
+        // Never the password, and the address is not a secret — an operator
+        // needs to know *which* account exists.
+        email,
+        administrator: outcome,
+        storage: config.storage,
+      });
+      if (outcome === 'exists') {
+        kernel.log.info('nothing to do', {
+          why: 'the bootstrap administrator already exists; seeding is idempotent by address',
+        });
+      }
+      return 0;
+    } catch (error) {
+      kernel.log.error('seeding failed', { err: error });
+      return 70; // EX_SOFTWARE
+    } finally {
+      await db?.close();
+    }
+  });
+}
 
 async function migrate(kernel: Kernel, config: AppConfig): Promise<number> {
   return Carrier.run(kernel.provenance.forMigration(), async () => {
@@ -551,10 +865,12 @@ export async function main(argv: readonly string[]): Promise<number> {
       return migrate(wireKernel(config), config);
     case 'doctor':
       return doctor(wireKernel(config));
+    case 'seed':
+      return seed(wireKernel(config), config, argv.includes('--demo'));
     default:
       process.stderr.write(
         `unknown command: ${command}\n` +
-          `usage: modular-hx-ts [serve|version|secrets|migrate|doctor]\n`,
+          `usage: modular-hx-ts [serve|version|secrets|migrate|seed [--demo]|doctor]\n`,
       );
       return 2;
   }

@@ -203,9 +203,14 @@ module.exports = {
       name: 'S9-root-is-a-leaf',
       comment:
         'S9: the composition root is the only place that knows concrete types, ' +
-        'and nothing imports it. Exempt: the in-process composition smoke test.',
+        'and nothing imports it. Exempt: the in-process composition smoke test, ' +
+        'and the root importing itself — `main.ts` is the process and `wire.ts` ' +
+        'is the assembly, and a rule that forbade that would forbid splitting ' +
+        'the root into more than one file at all.',
       severity: 'error',
-      from: { pathNot: '\\.test\\.ts$' },
+      from: {
+        pathNot: '\\.test\\.ts$|^src/(wire|main|config|policy)\\.ts$',
+      },
       to: { path: '^src/(wire|main|config|policy)\\.ts$' },
     },
 

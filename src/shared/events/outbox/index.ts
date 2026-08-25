@@ -41,6 +41,19 @@ export interface OutboxOptions {
   readonly maxAttempts?: number;
   /** Names this relay in `lease_owner`, so a stuck claim is attributable. */
   readonly owner?: string;
+  /**
+   * How often `start()` drains. Default one second.
+   *
+   * **Polling, not `listen`/`notify`.** A notification is lost if nobody is
+   * connected when it fires, so a relay built on it alone silently stops after
+   * a reconnect; polling is the floor that makes the system correct, and
+   * `listen` would only ever be a latency optimisation on top.
+   */
+  readonly pollEvery?: Millis;
+  /** Where a failing drain announces itself. Silence here is a stalled relay. */
+  readonly reporter?: {
+    error(message: string, fields?: Record<string, unknown>): void;
+  };
 }
 
 export interface Outbox extends Events {
@@ -74,7 +87,49 @@ export function outboxEvents(options: OutboxOptions): Outbox {
     return millis(random.int(Math.max(1, Math.floor(ceiling))));
   };
 
+  const pollEvery = options.pollEvery ?? seconds(1);
+  let timer: ReturnType<typeof setInterval> | undefined;
+  let draining = false;
+
   const dispatcher: Dispatcher = {
+    /**
+     * Begin draining on an interval. **A relay nobody starts is a queue.**
+     *
+     * This existed as `drain()` alone, and `drain()` had a contract suite that
+     * passed: the tests called it. Nothing in the running process did, so every
+     * event published in Postgres mode went into the table and stayed there —
+     * and the symptom was not an error anywhere, it was an audit log that was
+     * simply empty.
+     */
+    start(): Promise<void> {
+      if (timer !== undefined) return Promise.resolve();
+      timer = setInterval(() => {
+        // **Never two passes at once.** A drain slower than the interval would
+        // otherwise stack, and each pass takes its own lease.
+        if (draining) return;
+        draining = true;
+        void dispatcher
+          .drain()
+          .catch((error: unknown) => {
+            options.reporter?.error('the outbox relay failed a pass', {
+              error: String(error),
+            });
+          })
+          .finally(() => {
+            draining = false;
+          });
+      }, pollEvery);
+      // Never hold the process open: shutdown is `lifecycle`'s to decide.
+      timer.unref();
+      return Promise.resolve();
+    },
+
+    stop(): Promise<void> {
+      if (timer !== undefined) clearInterval(timer);
+      timer = undefined;
+      return Promise.resolve();
+    },
+
     async drain(): Promise<number> {
       // Claim and dispatch are separate transactions on purpose: holding a
       // transaction open across a subscriber's work would put an arbitrary

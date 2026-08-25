@@ -157,7 +157,7 @@ describe('what the chain guarantees that no middleware does', () => {
 
     expect(response.headers['content-type']).toBe('application/problem+json');
     expect(JSON.parse(response.body)).toMatchObject({
-      type: '/problems/not_found',
+      type: '/problems/not-found',
       title: 'Not found',
       status: 404,
       detail: 'no such thing',

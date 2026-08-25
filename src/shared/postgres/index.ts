@@ -47,3 +47,19 @@ export {
   checksum,
   migrate,
 } from './migrate.js';
+
+/**
+ * Escape `%` and `_` for a `like` pattern. **Shared, because it was copied.**
+ *
+ * `audit` had it and `identity` needed it, and the collection's own rule is
+ * that the **second copy** is the trigger for promotion rather than the third
+ * caller. Two escapers eventually disagree about backslash, and the one that
+ * disagrees is the one a filter turns into a scan of everything.
+ *
+ * Callers must pair it with `escape '\\'` in the statement: the default escape
+ * character is backslash on most builds and **not guaranteed**, and a pattern
+ * whose escapes are inert matches more than it says.
+ */
+export function escapeLike(value: string): string {
+  return value.replace(/[\\%_]/g, (character) => `\\${character}`);
+}

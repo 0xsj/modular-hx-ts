@@ -26,6 +26,9 @@ import {
   type Limit,
   callerKey,
   forwardedFor,
+  ignoredForwarding,
+  isTrusted,
+  trustedProxies,
   memoryBucketStore,
   memoryBuckets,
   rateLimitHeaders,
@@ -37,7 +40,6 @@ import {
 const LIMIT: Limit = { limit: 5, window: seconds(10) };
 
 describe('memory adapter', () => {
-  const clock = fakeClock();
   // **One store, handed to every limiter the suite asks for.** A factory that
   // built a private map per call would pass `two limiters over one store`
   // without sharing anything, which is the exact defect the case exists for.
@@ -45,11 +47,10 @@ describe('memory adapter', () => {
 
   bucketContract(() => ({
     name: 'memory',
-    buckets: () => memoryBuckets(store, clock),
+    buckets: () => memoryBuckets(store),
     // A fake clock, so a wide window costs nothing and the arithmetic is
     // exercised at a scale a real wait could never afford.
     window: seconds(10),
-    advance: (duration) => clock.advance(duration),
   }));
 });
 
@@ -69,25 +70,57 @@ describe('refill is monotonic — rule M13', () => {
     expect(refilled(0, millis(365 * 24 * 3_600_000), LIMIT)).toBe(5);
   });
 
-  it('reads the MONOTONIC clock, so a wall-clock jump moves nothing', async () => {
-    // **The test the collection asks for by name.** `breaker` was bitten twice
-    // by this shape. `setWallClock` moves the wall reading and leaves the
-    // monotonic one alone — which is what an NTP correction actually is.
-    const clock = fakeClock();
-    const buckets = memoryBuckets(memoryBucketStore(), clock);
+  it('reads WALL time, and bounds a clock step in both directions', async () => {
+    // **This test used to assert the opposite**, and it was right at the time:
+    // the adapter read `clock.elapsed()`, satisfying `M13` exactly, and a
+    // wall-clock jump moved nothing.
+    //
+    // `MODULES.md` §5 overrides `M13` here, and narrowly. A monotonic reading
+    // is per-process: two replicas' origins are unrelated, so their readings
+    // cannot refill one shared bucket. Shared state has no monotonic option, so
+    // the base is wall time and skew becomes a **bounded inaccuracy** rather
+    // than a correctness bug — which is a claim, so it is asserted rather than
+    // stated.
+    const buckets = memoryBuckets(memoryBucketStore());
+    const at = (iso: string): Date => new Date(iso);
+    const START = '2026-01-01T00:00:00.000Z';
 
-    for (let i = 0; i < 5; i++) await buckets.take('victim', LIMIT);
+    for (let i = 0; i < 5; i++) await buckets.take('victim', LIMIT, at(START));
 
-    // A year forward on the wall clock. No time has passed.
-    clock.setWallClock(new Date('2027-01-01T00:00:00.000Z'));
-    expect((await buckets.take('victim', LIMIT)).allowed).toBe(false);
+    // **Backward: refills nothing, never stalls.** Elapsed is floored at zero
+    // in `bucket.ts`, so a correction that moves the clock back cannot drain a
+    // bucket or push its reset into next year.
+    const backward = await buckets.take(
+      'victim',
+      LIMIT,
+      at('2025-01-01T00:00:00.000Z'),
+    );
+    expect(backward.allowed).toBe(false);
+    expect(backward.remaining).toBe(0);
 
-    // And a year backward does not stall the bucket either: real elapsed time
-    // is what refills it.
-    clock.setWallClock(new Date('2025-01-01T00:00:00.000Z'));
-    await clock.advance(seconds(10));
+    // **Forward: at most one full bucket, never an unbounded one.** The result
+    // is capped at capacity, so a year-long jump costs exactly one burst.
+    const forward = await buckets.take(
+      'victim',
+      LIMIT,
+      at('2027-01-01T00:00:00.000Z'),
+    );
+    expect(forward.allowed).toBe(true);
+    expect(forward.remaining).toBe(LIMIT.limit - 1);
+  });
 
-    expect((await buckets.take('victim', LIMIT)).allowed).toBe(true);
+  it('is the same store from two limiters — the case that matters', async () => {
+    // Kept beside the clock case because the two are the reason the reading
+    // moved: one fake clock now drives the twin and the shared adapter, so the
+    // contract suite can assert refill on both instead of on neither.
+    const store = memoryBucketStore();
+    const first = memoryBuckets(store);
+    const second = memoryBuckets(store);
+    const at = new Date('2026-01-01T00:00:00.000Z');
+
+    for (let i = 0; i < 5; i++) await first.take('shared', LIMIT, at);
+
+    expect((await second.take('shared', LIMIT, at)).allowed).toBe(false);
   });
 });
 
@@ -184,50 +217,141 @@ describe('the caller is the principal', () => {
 });
 
 describe('the trusted-proxy question', () => {
+  // 10.0.0.0/8 is the proxy tier; everything else is a caller.
+  const TRUST = trustedProxies('10.0.0.0/8');
   const headers = { 'x-forwarded-for': '198.51.100.9, 203.0.113.7' };
 
-  it('IGNORES a forwarded-for header by default', () => {
-    // **The default a deployment that has not thought about it gets.**
-    // Trusting the header unconditionally hands every caller a limit-evasion
-    // primitive: a new address per request is a new bucket.
+  it('refuses an absent setting rather than defaulting either way', () => {
+    // **The rule with the sharpest edge** — `MODULES.md` §5. Both candidate
+    // defaults are wrong in the same way: trusting by default hands every
+    // caller a limit-evasion primitive, and not trusting by default makes the
+    // limiter global behind any load balancer — failing conformance case 40 on
+    // the first day of a real deployment while looking perfectly safe.
+    expect(() => trustedProxies(undefined)).toThrow(/not configured/);
+    expect(() => trustedProxies('')).toThrow(/not configured/);
+  });
+
+  it('accepts `none` as a legal explicit answer', () => {
+    // What development sets, and the distinction the rule turns on: nobody has
+    // to trust a proxy, but everybody has to answer the question.
+    expect(trustedProxies('none').prefixes).toEqual([]);
     expect(
-      callerKey(provenanceFor(Actor.anonymous()), '10.0.0.1', headers),
+      callerKey(provenanceFor(Actor.anonymous()), '10.0.0.1', headers, {
+        prefixes: [],
+      }),
     ).toBe('peer:10.0.0.1');
   });
 
-  it('reads from the RIGHT once a proxy is configured', () => {
-    // With one proxy in front, the last entry is the address that proxy
-    // observed. Everything to its left is whatever the caller chose to send.
-    expect(forwardedFor(headers, { trustedProxyHops: 1 })).toBe('203.0.113.7');
+  it('IGNORES a forwarded-for header from an untrusted peer', () => {
+    // The peer is the precondition. A header from outside the trusted set is a
+    // header the caller wrote, whatever it says.
+    expect(
+      callerKey(
+        provenanceFor(Actor.anonymous()),
+        '198.51.100.9',
+        headers,
+        TRUST,
+      ),
+    ).toBe('peer:198.51.100.9');
+  });
+
+  it('walks right to left and stops at the first address outside the set', () => {
+    // Two of our proxies appended their view; the entry before them is the
+    // client, and everything to *its* left is whatever the caller sent.
+    const chain = {
+      'x-forwarded-for': '198.51.100.9, 203.0.113.7, 10.0.0.9, 10.0.0.8',
+    };
+
+    expect(forwardedFor('10.0.0.8', chain, TRUST)).toBe('203.0.113.7');
   });
 
   it('does not let a caller forge a victim`s address', () => {
     // **The worse half of trusting it.** Forging the leftmost entry is a
     // limit-evasion trick; forging it as *somebody else's* address exhausts
     // their bucket, which turns a throttle into a tool aimed at one victim.
-    const forged = {
-      'x-forwarded-for': '<victim>, 203.0.113.7',
-    };
+    const forged = { 'x-forwarded-for': '<victim>, 203.0.113.7' };
 
-    expect(forwardedFor(forged, { trustedProxyHops: 1 })).toBe('203.0.113.7');
-    expect(forwardedFor(forged, { trustedProxyHops: 1 })).not.toContain(
-      'victim',
-    );
+    expect(forwardedFor('10.0.0.1', forged, TRUST)).toBe('203.0.113.7');
   });
 
-  it('takes nothing when the chain is shorter than the topology claims', () => {
-    // The request did not arrive through the proxies this deployment
-    // describes, so nothing in the header is attributable. The peer still is.
-    expect(forwardedFor(headers, { trustedProxyHops: 5 })).toBeUndefined();
+  it('survives a topology change, where a hop count would fail OPEN', () => {
+    // **Why this is prefixes and not a count.** `trustedProxyHops: 1` means
+    // *the last entry is the client*. Add a second proxy and the entry at that
+    // position is one the caller wrote — header present, count satisfied,
+    // limiter keying on an attacker-supplied address, nothing looking wrong.
+    // Walking the set fails closed instead: an extra trusted hop is skipped.
+    const oneProxy = { 'x-forwarded-for': '203.0.113.7, 10.0.0.8' };
+    const twoProxies = { 'x-forwarded-for': '203.0.113.7, 10.0.0.9, 10.0.0.8' };
+
+    expect(forwardedFor('10.0.0.8', oneProxy, TRUST)).toBe('203.0.113.7');
+    expect(forwardedFor('10.0.0.8', twoProxies, TRUST)).toBe('203.0.113.7');
+  });
+
+  it('falls back to the peer when every entry is one of ours', () => {
+    const ours = { 'x-forwarded-for': '10.0.0.9, 10.0.0.8' };
+
+    expect(forwardedFor('10.0.0.8', ours, TRUST)).toBeUndefined();
+  });
+
+  it('reads X-Real-IP only when X-Forwarded-For is absent, and gates it', () => {
+    // XFF wins because it carries a chain that can be *validated* by walking.
+    // `X-Real-IP` is a single unverifiable assertion, and commonly a less
+    // accurate one: a proxy typically sets it to its own immediate peer, which
+    // behind two proxies is not the client.
+    const both = {
+      'x-forwarded-for': '203.0.113.7, 10.0.0.8',
+      'x-real-ip': '192.0.2.99',
+    };
+    const only = { 'x-real-ip': '192.0.2.99' };
+
+    expect(forwardedFor('10.0.0.8', both, TRUST)).toBe('203.0.113.7');
+    expect(forwardedFor('10.0.0.8', only, TRUST)).toBe('192.0.2.99');
+    // Same header, untrusted peer: ignored.
+    expect(forwardedFor('198.51.100.9', only, TRUST)).toBeUndefined();
+  });
+
+  it('says when it ignored a populated header', () => {
+    // **The failure this prevents is social.** Silently ignoring a populated
+    // header looks like a bug, and the obvious fix somebody reaches for is to
+    // trust it unconditionally.
+    expect(ignoredForwarding('198.51.100.9', headers, TRUST)).toBe(true);
+    expect(ignoredForwarding('10.0.0.8', headers, TRUST)).toBe(false);
+    expect(ignoredForwarding('198.51.100.9', {}, TRUST)).toBe(false);
   });
 
   it('ignores an empty or malformed header rather than keying on nothing', () => {
+    expect(forwardedFor('10.0.0.8', { 'x-forwarded-for': '' }, TRUST)).toBe(
+      undefined,
+    );
     expect(
-      forwardedFor({ 'x-forwarded-for': '' }, { trustedProxyHops: 1 }),
-    ).toBe(undefined);
-    expect(
-      forwardedFor({ 'x-forwarded-for': '  ,  ' }, { trustedProxyHops: 1 }),
+      forwardedFor('10.0.0.8', { 'x-forwarded-for': '  ,  ' }, TRUST),
     ).toBeUndefined();
+  });
+
+  it('matches an IPv4-mapped IPv6 peer against an IPv4 prefix', () => {
+    // Node reports exactly this form on a dual-stack listener, so without the
+    // mapping the trusted set silently matches nothing in the deployment most
+    // likely to have proxies in front — and the limiter goes global.
+    expect(isTrusted('::ffff:10.0.0.8', TRUST)).toBe(true);
+    expect(isTrusted('::ffff:198.51.100.9', TRUST)).toBe(false);
+  });
+
+  it('does not match an IPv4 prefix against an unrelated IPv6 address', () => {
+    // Byte-wise comparison across families is how `10.0.0.0/8` starts matching
+    // addresses that merely begin with the same bytes.
+    expect(isTrusted('2001:db8::a00:8', TRUST)).toBe(false);
+    expect(isTrusted('2001:db8::1', trustedProxies('2001:db8::/32'))).toBe(
+      true,
+    );
+  });
+
+  it('refuses a prefix that is not one', () => {
+    expect(() => trustedProxies('10.0.0.0/64')).toThrow();
+    expect(() => trustedProxies('not-an-address')).toThrow();
+    // A bare address is a host route, not an error: it is what an operator
+    // means by naming one proxy.
+    expect(isTrusted('10.0.0.8', trustedProxies('10.0.0.8'))).toBe(true);
+    expect(isTrusted('10.0.0.9', trustedProxies('10.0.0.8'))).toBe(false);
   });
 });
 
@@ -238,15 +362,14 @@ const clock = systemClock();
 interface Wiring {
   readonly buckets?: Buckets;
   readonly limit?: Limit;
-  readonly replicas?: number;
+  readonly degradedLimit?: Limit;
   readonly reporter?: Reporter;
   readonly anonymous?: boolean;
   readonly withIdempotency?: boolean;
 }
 
 function callable(handler: Handler, wiring: Wiring = {}) {
-  const buckets =
-    wiring.buckets ?? memoryBuckets(memoryBucketStore(), fakeClock());
+  const buckets = wiring.buckets ?? memoryBuckets(memoryBucketStore());
 
   const built = chain(
     {
@@ -261,10 +384,13 @@ function callable(handler: Handler, wiring: Wiring = {}) {
       },
       // **The whole wiring.** The slot was named and empty; this is one line.
       ratelimit: ratelimit({
+        trust: { prefixes: [] },
         buckets,
         clock,
         limit: wiring.limit ?? LIMIT,
-        ...(wiring.replicas === undefined ? {} : { replicas: wiring.replicas }),
+        ...(wiring.degradedLimit === undefined
+          ? {}
+          : { degradedLimit: wiring.degradedLimit }),
         ...(wiring.reporter === undefined ? {} : { reporter: wiring.reporter }),
       }),
       ...(wiring.withIdempotency === true
@@ -383,7 +509,7 @@ describe('the 429 goes through the same mapper as every other error', () => {
 describe('per caller, never global — case 40', () => {
   it('does not let one caller spend another`s budget', async () => {
     const store = memoryBucketStore();
-    const buckets = memoryBuckets(store, fakeClock());
+    const buckets = memoryBuckets(store);
 
     const alice = callable(ok, { buckets });
     const anonymous = callable(ok, { buckets, anonymous: true });
@@ -399,7 +525,7 @@ describe('per caller, never global — case 40', () => {
     // **The end-to-end version of the trusted-proxy default.** Untrusted, a
     // caller that rotates `X-Forwarded-For` is still one bucket; trusted by
     // accident, it has as many buckets as it cares to invent.
-    const buckets = memoryBuckets(memoryBucketStore(), fakeClock());
+    const buckets = memoryBuckets(memoryBucketStore());
     const call = callable(ok, { buckets, anonymous: true });
 
     for (let i = 0; i < 5; i++) {
@@ -414,7 +540,7 @@ describe('per caller, never global — case 40', () => {
   });
 
   it('separates two anonymous callers by peer address', async () => {
-    const buckets = memoryBuckets(memoryBucketStore(), fakeClock());
+    const buckets = memoryBuckets(memoryBucketStore());
     const call = callable(ok, { buckets, anonymous: true });
 
     for (let i = 0; i < 5; i++) await call({ peer: '203.0.113.7' });
@@ -438,15 +564,21 @@ describe('failing open means degrading, not switching off', () => {
     expect(response.status).toBe(200);
   });
 
-  it('still LIMITS, at one replica`s share', async () => {
+  it('still LIMITS, at a CONFIGURED degraded rate', async () => {
     // **The half that is easy to lose.** "The store is unreachable" and "there
     // is no limit" are different facts, and a store outage is exactly when an
     // unlimited edge is most dangerous — whatever took the store down is
     // usually load, and removing the limiter adds more of it.
+    //
+    // This used to read `replicas: 4` and expect `12 / 4`. `MODULES.md` §5
+    // rejects that shape: a process must not be told its own fleet size. It
+    // cannot verify the number, the orchestrator already owns it, and it goes
+    // stale in silence — scale to twelve replicas without editing the config
+    // and each admits a quarter of the limit, which is three times the limit.
     const call = callable(ok, {
       buckets: broken,
       limit: { limit: 12, window: seconds(10) },
-      replicas: 4,
+      degradedLimit: { limit: 3, window: seconds(10) },
     });
 
     let admitted = 0;
@@ -454,14 +586,43 @@ describe('failing open means degrading, not switching off', () => {
       if ((await call()).status === 200) admitted += 1;
     }
 
-    // 12 across 4 replicas is 3 here, not 12 and not unlimited.
     expect(admitted).toBe(3);
+  });
+
+  it('defaults the degraded rate to the FULL limit, and says so', async () => {
+    // **Stated rather than disguised.** With no configured rate, N replicas
+    // collectively admit N×limit during an outage. A share calculation would
+    // imply the aggregate is preserved; the thing the outage took away *is*
+    // the coordination that made an aggregate meaningful. Per-process limiting
+    // still stops one caller hammering one replica, which is what "approximate
+    // rather than absent" buys.
+    const lines: { message: string; fields?: Record<string, unknown> }[] = [];
+    const call = callable(ok, {
+      buckets: broken,
+      limit: { limit: 3, window: seconds(10) },
+      reporter: {
+        info: () => undefined,
+        error: (message, fields) =>
+          lines.push({ message, ...(fields === undefined ? {} : { fields }) }),
+      },
+    });
+
+    let admitted = 0;
+    for (let i = 0; i < 6; i++) {
+      if ((await call()).status === 200) admitted += 1;
+    }
+
+    expect(admitted).toBe(3);
+    // `I9`: the fail-open choice is logged **when it fires**, with the rate
+    // now in force and whether anybody chose it.
+    expect(lines[0]?.fields?.['degraded_limit']).toBe(3);
+    expect(lines[0]?.fields?.['configured']).toBe(false);
   });
 
   it('accumulates in one fallback bucket rather than a fresh one per request', async () => {
     // A fallback rebuilt per request is a full bucket per request, which is no
     // limit at all wearing a limit's shape.
-    const call = callable(ok, { buckets: broken, limit: LIMIT, replicas: 1 });
+    const call = callable(ok, { buckets: broken, limit: LIMIT });
 
     for (let i = 0; i < 5; i++) await call();
 
@@ -489,7 +650,7 @@ describe('failing open means degrading, not switching off', () => {
       take: (key, limit) =>
         failing
           ? Promise.reject(unavailable('connection refused'))
-          : memoryBuckets(memoryBucketStore(), fakeClock()).take(key, limit),
+          : memoryBuckets(memoryBucketStore()).take(key, limit, clock.now()),
       purge: () => Promise.resolve(0),
     };
 
@@ -512,7 +673,7 @@ describe('what is never limited', () => {
     // Throttling the endpoint an orchestrator polls turns a traffic spike into
     // a rolling restart — the limiter causing the outage it was installed to
     // prevent.
-    const buckets = memoryBuckets(memoryBucketStore(), fakeClock());
+    const buckets = memoryBuckets(memoryBucketStore());
     const call = callable(ok, {
       buckets,
       limit: { limit: 1, window: seconds(10) },
@@ -530,7 +691,7 @@ describe('what is never limited', () => {
     // Exempt means *not counted*, not *counted and forgiven*: a readiness poll
     // every second would otherwise drain a caller's bucket without ever being
     // refused itself.
-    const buckets = memoryBuckets(memoryBucketStore(), fakeClock());
+    const buckets = memoryBuckets(memoryBucketStore());
     const call = callable(ok, {
       buckets,
       limit: { limit: 2, window: seconds(10) },
@@ -549,7 +710,7 @@ describe('position 7 sits outside position 9', () => {
     // A replay is still a request against this edge. Position 9 answers it
     // without reaching the handler, and position 7 has already counted it —
     // otherwise a client with one key and a retry loop is unlimited.
-    const buckets = memoryBuckets(memoryBucketStore(), fakeClock());
+    const buckets = memoryBuckets(memoryBucketStore());
     const call = callable(ok, {
       buckets,
       withIdempotency: true,

@@ -6,7 +6,7 @@ import { fakeProvenance } from '../provenance/provenance.testkit.js';
 import { eventsContract } from './eventstest.js';
 import { contextOf, event, isEventName } from './event.js';
 import { Envelope, provenanceFor } from './envelope.js';
-import { matches } from './ports.js';
+import { EVERYTHING, matches } from './ports.js';
 import { memoryEvents } from './memory.js';
 
 describe('event names', () => {
@@ -73,6 +73,32 @@ describe('subscription patterns', () => {
     expect(matches('identity.*', 'identity.user.registered')).toBe(true);
     expect(matches('orgs.*', 'identity.user.registered')).toBe(false);
     expect(matches('identity.user.registered', 'identity.user.deleted')).toBe(
+      false,
+    );
+  });
+
+  it('treats the dot as the prefix boundary', () => {
+    // `identity.*` must not select `identityx.…`, or a context could shadow
+    // another's events by being named a prefix of it.
+    expect(matches('identity.*', 'identityx.user.registered')).toBe(false);
+  });
+
+  it('selects EVERYTHING for `*`', () => {
+    // **Added because `audit` cannot be written without it** — `CONTEXTS.md`
+    // §3 has it subscribing to *every* context's events. The alternative is one
+    // subscription per context, and the failure mode of that list is the next
+    // context's events silently missing from the record that is supposed to be
+    // the evidence.
+    expect(matches(EVERYTHING, 'identity.user.registered')).toBe(true);
+    expect(matches(EVERYTHING, 'orgs.membership.revoked')).toBe(true);
+    expect(matches(EVERYTHING, 'anything.at.all')).toBe(true);
+  });
+
+  it('does not let a bare `*` leak into the prefix form', () => {
+    // `*` is the whole pattern or it is nothing. A `*` in the middle would be a
+    // glob, and a glob is a second syntax nobody asked for.
+    expect(matches('identity.user.*', 'identity.user.registered')).toBe(true);
+    expect(matches('*.user.registered', 'identity.user.registered')).toBe(
       false,
     );
   });

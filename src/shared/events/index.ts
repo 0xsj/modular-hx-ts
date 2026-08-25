@@ -41,6 +41,7 @@ export {
   type Publisher,
   type Subscriber,
   type Subscription,
+  EVERYTHING,
   matches,
 } from './ports.js';
 

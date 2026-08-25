@@ -114,6 +114,21 @@ export interface AppErrorOptions {
    * dependency, so nothing here can enforce that for you.
    */
   readonly details?: Readonly<Record<string, unknown>>;
+  /**
+   * The problem type slug, when this failure has a **named** one.
+   *
+   * `CONFORMANCE.md` §3.5 fixes a catalogue — `invalid-credentials`,
+   * `token-expired`, `session-revoked`, `version-conflict`,
+   * `idempotency-in-flight`, `idempotency-mismatch`, `invalid-cursor` — and it
+   * is deliberately **finer than `Kind`**: a wrong password and a missing
+   * header are both `Unauthenticated`, and a client branching on `type` needs
+   * to tell them apart. RFC 9457 makes `type` the stable identifier, which is
+   * exactly why it cannot be a rename of the status.
+   *
+   * Absent means the kind's own slug, kebab-cased. The value is a slug, not a
+   * URI: rendering it is transport's job, and `I7` keeps that here.
+   */
+  readonly problem?: string;
 }
 
 /**
@@ -130,6 +145,8 @@ export class AppError extends Error {
   readonly kind: Kind;
   readonly fields: readonly FieldIssue[];
   readonly details: Readonly<Record<string, unknown>>;
+  /** The named problem slug, or absent for the kind's own. See above. */
+  readonly problem: string | undefined;
 
   constructor(kind: Kind, message: string, options: AppErrorOptions = {}) {
     // Only pass `cause` when there is one: with exactOptionalPropertyTypes an
@@ -140,6 +157,7 @@ export class AppError extends Error {
     this.kind = kind;
     this.fields = options.fields ?? [];
     this.details = options.details ?? {};
+    this.problem = options.problem;
   }
 }
 

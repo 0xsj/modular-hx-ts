@@ -22,24 +22,39 @@ export interface Subject {
   /** A limiter over the shared store. Called twice where that matters. */
   readonly buckets: () => Buckets;
   /**
-   * The window every case here uses.
+   * The window every case here uses. **One number, for both adapters now.**
    *
-   * **The adapter chooses it**, because the two pay for it differently: the
-   * memory twin drives an injected clock and a ten-second window costs nothing,
-   * while the shared adapter has to *wait* — `now()` lives inside PostgreSQL,
-   * where no injected clock reaches. A suite that fixed one number would either
-   * be slow against one adapter or too tight to be stable against the other.
+   * It used to be the adapter's choice, because the two paid for it
+   * differently: the twin drove an injected clock and a ten-second window cost
+   * nothing, while the shared adapter had to *wait* — `now()` lived inside
+   * PostgreSQL, where no injected clock reached. So the refill cases below,
+   * which are the ones a bucket exists for, ran against a real ten seconds in
+   * one adapter and a fake instant in the other.
    *
-   * The contract is the behaviour, not the number. Every case below is written
-   * in fractions of this window for exactly that reason.
+   * `MODULES.md` §5 moved the reading into `take`, and this is the payoff: one
+   * fake clock drives both, the shared adapter waits for nothing, and refill is
+   * asserted identically on each. Every case is still written in fractions of
+   * the window, which is what makes the contract the behaviour rather than the
+   * number.
    */
   readonly window: Millis;
-  /** Let `duration` of the adapter's own time pass. */
-  readonly advance: (duration: Millis) => Promise<void>;
 }
 
 let counter = 0;
 const nextKey = (): string => `contract-${String(++counter)}`;
+
+/**
+ * The one clock both adapters read.
+ *
+ * A module-level instant rather than a fixture, because it is the *argument*
+ * every call passes: with the reading in `take`, "advance time" is one
+ * assignment and needs no adapter cooperation at all.
+ */
+let instant = new Date('2026-01-01T00:00:00.000Z');
+const now = (): Date => instant;
+const advance = (duration: Millis): void => {
+  instant = new Date(instant.getTime() + duration);
+};
 
 /** Drain a bucket, returning how many were admitted. */
 async function drain(
@@ -50,7 +65,7 @@ async function drain(
 ): Promise<number> {
   let admitted = 0;
   for (let i = 0; i < attempts; i++) {
-    const decision = await buckets.take(key, limit);
+    const decision = await buckets.take(key, limit, now());
     if (decision.allowed) admitted += 1;
   }
   return admitted;
@@ -66,7 +81,7 @@ export function bucketContract(subject: () => Subject): void {
       const key = nextKey();
 
       expect(await drain(s.buckets(), key, 5, LIMIT)).toBe(5);
-      expect((await s.buckets().take(key, LIMIT)).allowed).toBe(false);
+      expect((await s.buckets().take(key, LIMIT, now())).allowed).toBe(false);
     });
 
     it('counts down remaining as it goes', async () => {
@@ -75,15 +90,17 @@ export function bucketContract(subject: () => Subject): void {
       const b = s.buckets();
       const key = nextKey();
 
-      expect((await b.take(key, LIMIT)).remaining).toBe(4);
-      expect((await b.take(key, LIMIT)).remaining).toBe(3);
-      expect((await b.take(key, LIMIT)).remaining).toBe(2);
+      expect((await b.take(key, LIMIT, now())).remaining).toBe(4);
+      expect((await b.take(key, LIMIT, now())).remaining).toBe(3);
+      expect((await b.take(key, LIMIT, now())).remaining).toBe(2);
     });
 
     it('reports the limit it was given', async () => {
       const s = subject();
 
-      expect((await s.buckets().take(nextKey(), limitFor(s))).limit).toBe(5);
+      expect(
+        (await s.buckets().take(nextKey(), limitFor(s), now())).limit,
+      ).toBe(5);
     });
 
     it('does not let one key spend another key`s budget', async () => {
@@ -97,7 +114,7 @@ export function bucketContract(subject: () => Subject): void {
 
       await drain(b, mine, 5, LIMIT);
 
-      expect((await b.take(theirs, LIMIT)).allowed).toBe(true);
+      expect((await b.take(theirs, LIMIT, now())).allowed).toBe(true);
     });
   });
 
@@ -113,7 +130,7 @@ export function bucketContract(subject: () => Subject): void {
       const key = nextKey();
 
       const outcomes = await Promise.all(
-        Array.from({ length: 20 }, () => b.take(key, LIMIT)),
+        Array.from({ length: 20 }, () => b.take(key, LIMIT, now())),
       );
 
       expect(outcomes.filter((o) => o.allowed)).toHaveLength(5);
@@ -127,8 +144,8 @@ export function bucketContract(subject: () => Subject): void {
       const key = nextKey();
 
       const outcomes = await Promise.all([
-        ...Array.from({ length: 10 }, () => first.take(key, LIMIT)),
-        ...Array.from({ length: 10 }, () => second.take(key, LIMIT)),
+        ...Array.from({ length: 10 }, () => first.take(key, LIMIT, now())),
+        ...Array.from({ length: 10 }, () => second.take(key, LIMIT, now())),
       ]);
 
       expect(outcomes.filter((o) => o.allowed)).toHaveLength(5);
@@ -163,7 +180,7 @@ export function bucketContract(subject: () => Subject): void {
       await drain(first, key, 4, LIMIT);
 
       // Not 4: the second replica reads the same bucket, not its own.
-      expect((await second.take(key, LIMIT)).remaining).toBe(0);
+      expect((await second.take(key, LIMIT, now())).remaining).toBe(0);
     });
 
     it('refuses at the second replica once the first has drained it', async () => {
@@ -175,7 +192,7 @@ export function bucketContract(subject: () => Subject): void {
 
       await drain(first, key, 5, LIMIT);
 
-      expect((await second.take(key, LIMIT)).allowed).toBe(false);
+      expect((await second.take(key, LIMIT, now())).allowed).toBe(false);
     });
   });
 
@@ -189,7 +206,7 @@ export function bucketContract(subject: () => Subject): void {
       const key = nextKey();
 
       await drain(b, key, 5, LIMIT);
-      await s.advance(fraction(s, 0.4));
+      advance(fraction(s, 0.4));
 
       expect(await drain(b, key, 3, LIMIT)).toBe(2);
     });
@@ -200,8 +217,8 @@ export function bucketContract(subject: () => Subject): void {
       const b = s.buckets();
       const key = nextKey();
 
-      await b.take(key, LIMIT);
-      await s.advance(fraction(s, 3));
+      await b.take(key, LIMIT, now());
+      advance(fraction(s, 3));
 
       // Six waits would be a burst of 30 if the bucket kept accruing.
       expect(await drain(b, key, 8, LIMIT)).toBe(5);
@@ -214,7 +231,7 @@ export function bucketContract(subject: () => Subject): void {
       const key = nextKey();
 
       await drain(b, key, 5, LIMIT);
-      const refused = await b.take(key, LIMIT);
+      const refused = await b.take(key, LIMIT, now());
 
       expect(refused.allowed).toBe(false);
       // One token at five per ten seconds is two seconds away.
@@ -227,9 +244,9 @@ export function bucketContract(subject: () => Subject): void {
       // admitted*. There is nothing to wait for.
       const s = subject();
 
-      expect((await s.buckets().take(nextKey(), limitFor(s))).resetAfter).toBe(
-        0,
-      );
+      expect(
+        (await s.buckets().take(nextKey(), limitFor(s), now())).resetAfter,
+      ).toBe(0);
     });
   });
 
@@ -241,16 +258,16 @@ export function bucketContract(subject: () => Subject): void {
       const idle = nextKey();
       const busy = nextKey();
 
-      await b.take(idle, LIMIT);
-      await s.advance(fraction(s, 1.1));
-      await b.take(busy, LIMIT);
+      await b.take(idle, LIMIT, now());
+      advance(fraction(s, 1.1));
+      await b.take(busy, LIMIT, now());
 
-      await b.purge(LIMIT);
+      await b.purge(LIMIT, now());
 
       // Dropping a full bucket changes no answer — it is indistinguishable from
       // one that never existed — while a bucket mid-spend must survive, or a
       // purge becomes a free refill.
-      expect((await b.take(busy, LIMIT)).remaining).toBe(3);
+      expect((await b.take(busy, LIMIT, now())).remaining).toBe(3);
     });
   });
 
@@ -272,7 +289,7 @@ export function bucketContract(subject: () => Subject): void {
       const key = nextKey();
 
       await drain(b, key, 5, LIMIT);
-      const decision = await b.take(key, { limit: 1, window: s.window });
+      const decision = await b.take(key, { limit: 1, window: s.window }, now());
 
       expect(decision.remaining).toBeGreaterThanOrEqual(0);
     });

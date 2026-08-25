@@ -10,70 +10,76 @@
  */
 
 import { ActorKind, type Provenance } from '../provenance/index.js';
+import { type ProxyTrust, NO_PROXIES, isTrusted } from './trust.js';
 
 const FORWARDED_FOR = 'x-forwarded-for';
+const REAL_IP = 'x-real-ip';
 
 /**
- * How far to trust `X-Forwarded-For`.
+ * The client address, walking `X-Forwarded-For` **right to left**.
  *
- * **The default is to trust nothing, and that is the whole point of the shape.**
- * A deployment that has not thought about its proxy topology gets the safe
- * behaviour: the transport peer, which cannot be forged by a caller.
+ * Each hop appends the address it saw, so the rightmost entry was written by
+ * the proxy nearest this process. Skip entries that are inside the trusted set;
+ * the **first one outside it** is the client, and everything to its left is
+ * whatever the caller chose to send.
  *
- * Trusting the header unconditionally hands every caller a limit-evasion
- * primitive — a new address per request is a new bucket — and, worse, lets one
- * caller *exhaust another's* bucket by forging their address. The second is the
- * one that turns a throttle into a denial-of-service tool aimed at a specific
- * victim.
- */
-export interface ProxyTrust {
-  /**
-   * How many proxies you operate in front of this process.
-   *
-   * **Zero means the header is ignored entirely.** Above zero, the client
-   * address is counted from the **right**: `X-Forwarded-For` is appended to by
-   * each hop, so with one trusted proxy the last entry is the address that
-   * proxy observed and everything to its left is whatever the caller sent.
-   *
-   * Taking the *leftmost* entry is the classic version of this bug, and it is
-   * the one that reads most naturally — the leftmost entry is described
-   * everywhere as "the original client", which is true only if nobody lied.
-   */
-  readonly trustedProxyHops: number;
-}
-
-export const UNTRUSTED: ProxyTrust = { trustedProxyHops: 0 };
-
-/**
- * The address the outermost trusted proxy observed.
+ * Taking the *leftmost* entry is the classic version of this bug, and it reads
+ * most naturally — the leftmost entry is described everywhere as "the original
+ * client", which is true only if nobody lied.
  *
- * Returns `undefined` when the header cannot be trusted to that depth, so the
- * caller falls back to the transport peer rather than to a guess.
+ * `undefined` when nothing is attributable, so the caller falls back to the
+ * transport peer rather than to a guess.
  */
 export function forwardedFor(
+  peer: string,
   headers: Readonly<Record<string, string>>,
   trust: ProxyTrust,
 ): string | undefined {
-  if (trust.trustedProxyHops <= 0) return undefined;
+  // **The immediate peer is the precondition.** A header from an untrusted peer
+  // is a header the caller wrote, whatever it says.
+  if (!isTrusted(peer, trust)) return undefined;
 
   const raw = headers[FORWARDED_FOR];
-  if (raw === undefined) return undefined;
+  if (raw !== undefined) {
+    const hops = raw
+      .split(',')
+      .map((entry) => entry.trim())
+      .filter((entry) => entry !== '');
 
-  const hops = raw
-    .split(',')
-    .map((entry) => entry.trim())
-    .filter((entry) => entry.length > 0);
-
-  // Count from the right. `hops` entries were appended by proxies we operate,
-  // so the one at that depth is the last address we can vouch for.
-  const index = hops.length - trust.trustedProxyHops;
-  if (index < 0) {
-    // Fewer entries than proxies claimed: the request did not come through the
-    // topology this deployment describes, so nothing in the header is
-    // attributable. The peer address is still true.
+    for (let index = hops.length - 1; index >= 0; index -= 1) {
+      const hop = hops[index] ?? '';
+      if (!isTrusted(hop, trust)) return hop;
+    }
+    // Every entry was one of ours, which means no client address is present.
+    // The peer is still true.
     return undefined;
   }
-  return hops[index];
+
+  // **`X-Real-IP` loses to `X-Forwarded-For`, and is only read when it is
+  // absent.** XFF carries a chain that can be *validated* by walking; this is a
+  // single unverifiable assertion, and commonly a less accurate one — a proxy
+  // typically sets it to its own immediate peer, which behind two proxies is
+  // not the client.
+  const real = headers[REAL_IP];
+  return real === undefined || real.trim() === '' ? undefined : real.trim();
+}
+
+/**
+ * Was a forwarding header present and ignored?
+ *
+ * **The failure this prevents is social.** Silently ignoring a populated header
+ * looks like a bug, and the obvious fix somebody reaches for is to trust it
+ * unconditionally — which is the limit-evasion primitive. Saying so, sampled,
+ * is what stops that conversation from starting.
+ */
+export function ignoredForwarding(
+  peer: string,
+  headers: Readonly<Record<string, string>>,
+  trust: ProxyTrust,
+): boolean {
+  const present =
+    headers[FORWARDED_FOR] !== undefined || headers[REAL_IP] !== undefined;
+  return present && !isTrusted(peer, trust);
 }
 
 /**
@@ -91,10 +97,10 @@ export function callerKey(
   provenance: Provenance,
   peer: string,
   headers: Readonly<Record<string, string>>,
-  trust: ProxyTrust = UNTRUSTED,
+  trust: ProxyTrust = NO_PROXIES,
 ): string {
   if (provenance.actor.kind !== ActorKind.Anonymous) {
     return `principal:${provenance.actor.toString()}`;
   }
-  return `peer:${forwardedFor(headers, trust) ?? peer}`;
+  return `peer:${forwardedFor(peer, headers, trust) ?? peer}`;
 }

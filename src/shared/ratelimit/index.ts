@@ -31,7 +31,13 @@ export {
   timeUntil,
 } from './bucket.js';
 
-export { type ProxyTrust, UNTRUSTED, callerKey, forwardedFor } from './key.js';
+export { callerKey, forwardedFor, ignoredForwarding } from './key.js';
+export {
+  type ProxyTrust,
+  NO_PROXIES,
+  isTrusted,
+  trustedProxies,
+} from './trust.js';
 
 export { type Buckets } from './port.js';
 

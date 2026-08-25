@@ -171,6 +171,31 @@ events.subscribe({
 
 ## Gotchas
 
+**A relay nobody starts is a queue.** `dispatcher.drain()` had a contract suite
+and it passed, because the suite called it. Nothing in the running process did.
+Every event published in Postgres mode went into `event_outbox` and stayed
+there, and the symptom was not an error anywhere — it was an audit log that was
+simply empty, in a process where every request answered 200.
+
+`start()`/`stop()` were already **declared** on the `Dispatcher` port and
+unimplemented, which is the shape of the bug: a port whose optional method
+nobody supplies looks identical to one nobody needs. The outbox now implements
+them as a polling loop, and `main.ts` registers it as a `lifecycle` component
+ahead of the HTTP server — so reverse-order shutdown stops accepting requests
+first, then drains what the last of them produced.
+
+Polling rather than `listen`/`notify`: a notification is lost if nobody is
+connected when it fires, so a relay built on it alone silently stops after a
+reconnect. `listen` could only ever be a latency optimisation on top of the
+poll, never a replacement for it.
+
+**Delivery is eventual, and a test that forgets this is a test that passes in
+memory and fails against Postgres.** The memory provider runs a subscriber
+inside the publishing transaction; the outbox delivers a moment later. That
+difference is the price of atomicity between the write and the event, and it is
+worth paying — but a journey asserting on an audit record immediately after the
+request that caused it has to wait for the condition rather than assume it.
+
 - **Payloads carry primitives only.** A payload crosses a process boundary, is
   stored for the life of an audit record, and is read by code compiled against a
   different version. A `Date` serializes three ways and a class instance

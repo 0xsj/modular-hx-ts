@@ -13,20 +13,32 @@
  * a factory that hid its own map inside a closure could not express it — which
  * would leave the contract suite unable to ask the question that matters.
  *
- * **This is the adapter that satisfies `M13` exactly**: the reading is
- * `clock.elapsed()`, monotonic by construction, so a wall-clock correction
- * moves nothing here.
+ * **The reading is passed in, and this adapter used to take a clock.** It read
+ * `clock.elapsed()` — monotonic, satisfying `M13` exactly — while the shared
+ * adapter read PostgreSQL's `now()`. Two adapters, two clocks, one contract
+ * suite: the suite could advance the twin's fake clock and not the store's, so
+ * refill — the one behaviour a bucket *is* — was the one behaviour the shared
+ * pair of cases could not assert on.
+ *
+ * `MODULES.md` §5 settles it: wall time, supplied by the caller. That is the
+ * narrow exception `M13` names, because two replicas' monotonic origins are
+ * unrelated and cannot refill one shared bucket. §5 permits this adapter to
+ * keep a monotonic reading in its *fallback* role; it does not, deliberately —
+ * two behaviours in one adapter is how the twin stops being a twin, and the
+ * arithmetic in `bucket.ts` already bounds a clock step in both directions
+ * (elapsed floored at zero, result capped at capacity), so the cost is at most
+ * one burst and never a stall.
  *
  * See `notes/patterns/ratelimit.md`.
  */
 
-import { type Clock, millis } from '../clock/index.js';
+import { millis } from '../clock/index.js';
 import { type Decision, type Limit, decide, refilled } from './bucket.js';
 import { type Buckets } from './port.js';
 
 interface Entry {
   tokens: number;
-  /** A monotonic reading, never a wall-clock instant. */
+  /** The wall-clock instant the caller supplied, in epoch milliseconds. */
   readAt: number;
 }
 
@@ -39,10 +51,10 @@ export function memoryBucketStore(): BucketStore {
   return { entries: new Map() };
 }
 
-export function memoryBuckets(store: BucketStore, clock: Clock): Buckets {
+export function memoryBuckets(store: BucketStore): Buckets {
   return {
-    take(key: string, limit: Limit): Promise<Decision> {
-      const now = clock.elapsed();
+    take(key: string, limit: Limit, at: Date): Promise<Decision> {
+      const now = at.getTime();
       const entry = store.entries.get(key);
 
       // Atomic by construction: JavaScript runs this to completion before any
@@ -60,8 +72,11 @@ export function memoryBuckets(store: BucketStore, clock: Clock): Buckets {
       return Promise.resolve(decide(allowed, tokens, limit));
     },
 
-    purge(idleFor: Limit): Promise<number> {
-      const now = clock.elapsed();
+    // `purge` reads the clock it was never given, so it takes the instant too.
+    // A store that consults its own clock in one method and not the other is a
+    // store the contract suite can only half drive.
+    purge(idleFor: Limit, at: Date): Promise<number> {
+      const now = at.getTime();
       let dropped = 0;
 
       for (const [key, entry] of store.entries) {

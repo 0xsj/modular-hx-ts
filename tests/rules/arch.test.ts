@@ -1,4 +1,4 @@
-import { existsSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -22,6 +22,10 @@ const require = createRequire(import.meta.url);
 const here = dirname(fileURLToPath(import.meta.url));
 const repoRoot = join(here, '..', '..');
 const fixtures = join(here, 'fixtures', 'arch');
+
+const { LAYERS } = require(join(repoRoot, 'layers.cjs')) as {
+  LAYERS: { id: string; modules: string[] }[];
+};
 
 const config = require(join(repoRoot, '.dependency-cruiser.cjs')) as {
   forbidden: IForbiddenRuleType[];
@@ -85,6 +89,76 @@ const CASES: readonly (readonly [fixture: string, rule: string])[] = [
   ['s10-vendor-logger', 'S10-vendor-logger'],
   ['no-circular', 'no-circular'],
 ];
+
+/**
+ * S1's map must be **total** — `../../ENFORCEMENT.md` S1, amended.
+ *
+ * > Every module in the tree resolves to a layer, or the test fails on the
+ * > module — never skips it.
+ *
+ * A module absent from `layers.cjs` is not un-ordered, it is **unchecked**:
+ * `inModules()` builds each S1 rule from the named list, so a module nobody
+ * named appears in no rule, matches no `from` and no `to`, and passes in
+ * silence. There is nothing to compare it against and no failure to read.
+ *
+ * A sibling found this the expensive way: `edge`, the floor of L4 that every
+ * other edge module imports, had never been in its map at all — so the one
+ * module the layer is built on was the one module S1 did not constrain, and it
+ * had passed every run since it was written.
+ *
+ * **A test rather than an inspection**, because the failure mode is silence and
+ * an inspection is a thing somebody remembers to do. A new module is two edits
+ * from now on: the code, and its row here.
+ */
+describe('S1 — the layer map is total', () => {
+  const assigned = new Set(LAYERS.flatMap((layer) => layer.modules));
+  const onDisk = readdirSync(join(repoRoot, 'src', 'shared'), {
+    withFileTypes: true,
+  })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => entry.name);
+
+  it('assigns every module under src/shared/ to a layer', () => {
+    const unassigned = onDisk.filter((module) => !assigned.has(module));
+
+    expect(
+      unassigned,
+      'these modules exist and S1 does not constrain them: add a row to layers.cjs',
+    ).toEqual([]);
+  });
+
+  it.each([
+    ['edge', 'L4'],
+    ['httpx', 'L4'],
+    ['httproute', 'L4'],
+    ['idempotency', 'L4'],
+    ['ratelimit', 'L4'],
+    ['conditional', 'L4'],
+  ])('places %s at %s', (module, tier) => {
+    // Named individually because the collection asked for these six by name,
+    // and because a totality check passes just as happily with a module in the
+    // wrong tier.
+    const found = LAYERS.find((layer) => layer.modules.includes(module));
+
+    expect(found?.id, `${module} is not at ${tier}`).toBe(tier);
+  });
+
+  it('does not name a module that no longer exists, except a declared one', () => {
+    // The reverse direction, and it is **not** an error on its own: a row may
+    // legitimately precede its directory — `openapi` is parked in
+    // `docs/TREE.md` with its layer already decided. What is an error is a row
+    // for a module that is neither on disk nor unticked in the tree, which is
+    // what a rename leaves behind.
+    const tree = readFileSync(join(repoRoot, 'docs', 'TREE.md'), 'utf8');
+    const stale = [...assigned].filter(
+      (module) =>
+        !onDisk.includes(module) &&
+        !tree.includes(`- [ ] \`src/shared/${module}/\``),
+    );
+
+    expect(stale, 'rows in layers.cjs pointing at nothing').toEqual([]);
+  });
+});
 
 describe('architecture rules', () => {
   it('a conforming tree reports no violations', async () => {

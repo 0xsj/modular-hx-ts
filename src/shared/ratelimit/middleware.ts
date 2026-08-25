@@ -28,7 +28,8 @@ import {
 } from '../edge/index.js';
 import { type Limit } from './bucket.js';
 import { rateLimitHeaders, retryAfter } from './headers.js';
-import { type ProxyTrust, UNTRUSTED, callerKey } from './key.js';
+import { callerKey, ignoredForwarding } from './key.js';
+import { type ProxyTrust } from './trust.js';
 import { memoryBucketStore, memoryBuckets } from './memory.js';
 import { type Buckets } from './port.js';
 
@@ -41,23 +42,44 @@ import { type Buckets } from './port.js';
  */
 export const NEVER_LIMITED: readonly string[] = ['/healthz', '/readyz'];
 
+/** One line per this many ignored forwarding headers. */
+const IGNORED_SAMPLE = 100;
+
 export interface RateLimitOptions {
   readonly buckets: Buckets;
   readonly clock: Clock;
   readonly limit: Limit;
 
   /**
-   * How many replicas share the limit.
+   * The rate one process allows while the shared store is unreachable.
    *
-   * Used **only** to size the degraded fallback: when the shared store is
-   * unreachable each process throttles at `limit / replicas`, so the fleet
-   * still approximates the configured rate instead of multiplying it by the
-   * replica count. Wrong by a factor of two is still a limit; absent is not.
+   * **Configured, never derived from a replica count.** This was `replicas`,
+   * and the fallback throttled at `limit / replicas` so the fleet would still
+   * approximate the configured rate. `MODULES.md` §5 rejects that shape and the
+   * reason is not the arithmetic: a process must not be told its own fleet
+   * size. It cannot verify the number, the orchestrator already owns it, and it
+   * goes stale in silence — scale four replicas to twelve without editing the
+   * config and each of the twelve admits a quarter of the limit, which is three
+   * times the limit, discovered by a customer.
+   *
+   * **It defaults to the full limit, and that is stated rather than
+   * disguised.** During an outage N replicas then admit N×limit collectively.
+   * A share calculation would imply the aggregate is preserved; the thing the
+   * outage took away *is* the coordination that made an aggregate meaningful.
+   * Per-process limiting still stops one caller hammering one replica, which is
+   * exactly what *approximate rather than absent* buys — and an operator who
+   * wants tighter behaviour sets the number, usually more conservatively than
+   * any share would allow, since a store outage tends to arrive with load.
    */
-  readonly replicas?: number;
+  readonly degradedLimit?: Limit;
 
-  /** Untrusted by default. See `key.ts`. */
-  readonly trust?: ProxyTrust;
+  /**
+   * Which proxies may set a forwarding header. **No default: see `key.ts`.**
+   *
+   * Required rather than optional, because both defaults are wrong in the same
+   * way and `none` is a legal explicit value.
+   */
+  readonly trust: ProxyTrust;
 
   /** Paths that are never limited. Defaults to liveness and readiness. */
   readonly exempt?: readonly string[];
@@ -73,25 +95,22 @@ export interface RateLimitOptions {
 }
 
 export function ratelimit(options: RateLimitOptions): Middleware {
-  const { buckets, clock, limit, reporter } = options;
-  const trust = options.trust ?? UNTRUSTED;
+  const { buckets, clock, limit, reporter, trust } = options;
   const exempt = new Set(options.exempt ?? NEVER_LIMITED);
 
   /**
-   * The degraded bucket, sized for one replica's share.
+   * The degraded bucket.
    *
    * Created once and kept, so it accumulates across an outage rather than
    * resetting on every request — a fallback rebuilt per request is a full
    * bucket per request, which is no limit at all wearing a limit's shape.
    */
-  const replicas = Math.max(1, options.replicas ?? 1);
-  const share: Limit = {
-    limit: Math.max(1, Math.floor(limit.limit / replicas)),
-    window: limit.window,
-  };
-  const fallback = memoryBuckets(memoryBucketStore(), clock);
+  const degradedLimit: Limit = options.degradedLimit ?? limit;
+  const fallback = memoryBuckets(memoryBucketStore());
 
   let degraded = false;
+  /** How many ignored forwarding headers since the last line. */
+  let ignored = 0;
 
   return async (exchange: Exchange, next): Promise<Response> => {
     if (exempt.has(exchange.request.path)) return next(exchange);
@@ -103,9 +122,33 @@ export function ratelimit(options: RateLimitOptions): Middleware {
       trust,
     );
 
+    // **Sampled, not per request.** A forwarding header from an untrusted peer
+    // is ignored, and silence about it looks like a bug — after which the
+    // obvious fix somebody reaches for is to trust it unconditionally. Every
+    // request behind a misconfigured proxy carries one, so per-request logging
+    // would bury the line it is trying to make visible.
+    ignored += ignoredForwarding(
+      exchange.request.peer,
+      exchange.request.headers,
+      trust,
+    )
+      ? 1
+      : 0;
+    if (ignored >= IGNORED_SAMPLE) {
+      reporter?.info('ignoring a forwarding header from an untrusted peer', {
+        peer: exchange.request.peer,
+        since_last: ignored,
+        why: 'the immediate peer is not in the trusted proxy set',
+      });
+      ignored = 0;
+    }
+
     let decision;
     try {
-      decision = await buckets.take(key, limit);
+      // **The reading, passed in.** One wall-clock instant drives whichever
+      // store answers, which is what lets one contract suite drive both.
+      const at = clock.now();
+      decision = await buckets.take(key, limit, at);
       if (degraded) {
         degraded = false;
         reporter?.info('rate limit store recovered; sharing again', {
@@ -125,12 +168,15 @@ export function ratelimit(options: RateLimitOptions): Middleware {
       if (!degraded) {
         degraded = true;
         reporter?.error('rate limit store unreachable; limiting per process', {
-          share: share.limit,
-          replicas,
+          // The rate that is now in force, and whether it was chosen. An
+          // operator reading this needs to know the fleet is collectively
+          // admitting N times it — which is true and is why the number is here.
+          degraded_limit: degradedLimit.limit,
+          configured: options.degradedLimit !== undefined,
           error: String(error),
         });
       }
-      decision = await fallback.take(key, share);
+      decision = await fallback.take(key, degradedLimit, clock.now());
     }
 
     // **On the exchange, not on the response.** Position 7 is below the problem

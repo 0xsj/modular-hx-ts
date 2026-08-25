@@ -613,7 +613,7 @@ describe('case 29 — a stale If-Match is 412, through the same mapper', () => {
     expect(response.status).toBe(412);
     expect(response.headers['content-type']).toBe('application/problem+json');
     expect(JSON.parse(response.body)).toMatchObject({
-      type: '/problems/precondition_failed',
+      type: '/problems/precondition-failed',
       status: 412,
     });
     expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);

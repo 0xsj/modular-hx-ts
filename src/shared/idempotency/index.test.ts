@@ -159,7 +159,12 @@ describe('conformance cases 25-28, end to end', () => {
     expect(second.status).toBe(422);
     expect(second.headers['content-type']).toBe('application/problem+json');
     expect(JSON.parse(second.body)).toMatchObject({
-      type: '/problems/unprocessable',
+      // **The named slug, not the kind's** — `CONFORMANCE.md` §3.5's catalogue.
+      // A client branching on `type` has to tell this from a claim that is
+      // still running, because one is worth retrying and the other never will
+      // be, and both are `Unprocessable`-adjacent refusals of an idempotency
+      // key.
+      type: '/problems/idempotency-mismatch',
       status: 422,
     });
   });

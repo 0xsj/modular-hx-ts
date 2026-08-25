@@ -285,6 +285,25 @@ const handler = chain(
 
 ## Gotchas
 
+**`anonymousCallers: 'refused'` is a claim about the whole chain, and it is
+false.** It asserts that everything behind position 9 requires authentication.
+No real process is like that: one chain serves a login endpoint and a charge
+endpoint, and routing happens *below* position 9, so the middleware cannot ask a
+route which one it is looking at. Without a way out, a client retrying
+**registration** with an `Idempotency-Key` — a perfectly reasonable thing to do —
+gets a 500 from the anonymous backstop.
+
+The seam is `exempt`, a list of paths this position does not engage on, and the
+composition root fills it by reading `auth` off the route table — the
+declaration `httproute` already carries. Deriving it matters: the first version
+was a hand-written list, and it was wrong on its first day (it named
+the login path for logout, which is a different path).
+
+The tidy answer is for idempotency to be **declared per route**, the way `auth`
+is. That needs the registry to run before this position, which inverts the chain
+order `httpx` specifies, so it is raised rather than resolved here. See
+[[httproute]].
+
 - **A key on a safe method is ignored, not refused.** A client library that
   attaches the header to every request is being harmlessly thorough, and there
   is no state to protect.

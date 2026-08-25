@@ -4,7 +4,8 @@
 # If a change makes rung 0 need infrastructure, the change is wrong.
 # See ../INFRASTRUCTURE.md §1.
 #
-#   make dev                zero dependencies         STORAGE=memory
+#   make dev                zero dependencies         STORAGE=memory, seeded
+#   make curl               zero dependencies         the journey, as requests
 #   make test               zero dependencies         unit + arch + docs rules
 #   make db-up && migrate   postgres                  schema applies
 #   make test-integration   postgres                  both adapters, one suite
@@ -54,8 +55,24 @@ install: ## Install dependencies from the lockfile
 	$(PNPM) install --frozen-lockfile
 
 .PHONY: dev
-dev: ## Run the whole application with zero external dependencies
-	STORAGE=memory $(PNPM) run dev
+dev: ## Boot, seed and serve — zero external dependencies
+	@# **Rung 0a.** `TRUSTED_PROXIES=none` is the legal explicit answer for a
+	@# process with no proxy in front (../MODULES.md §5 forbids a default), and
+	@# `SEED_ON_BOOT` fills this process with demo data. In memory mode `make
+	@# seed` would be a *different* process and a different empty map, which is
+	@# the trap this criterion exists to catch.
+	@echo "→ http://127.0.0.1:$${PORT:-15430}  ·  in another terminal: make curl"
+	STORAGE=memory TRUSTED_PROXIES=none SEED_ON_BOOT=demo $(PNPM) run dev
+
+.PHONY: curl
+curl: ## Print the journey as runnable requests — generated, never written
+	@# Read off the route table the server mounts, so a path that moves moves
+	@# here on the next run and a route that does not exist cannot be printed.
+	@$(PNPM) exec tsx tools/curl.ts
+
+.PHONY: routes
+routes: ## List every route this process serves — method, path, auth
+	@$(PNPM) exec tsx tools/routes.ts
 
 .PHONY: build
 build: ## Compile to dist/
@@ -173,6 +190,15 @@ mail-up: ## Mailpit only — SMTP sink plus a web UI to read it
 .PHONY: mail-down
 mail-down: ## Stop Mailpit, keeping the rest of the stack
 	$(DC) stop mailpit
+
+.PHONY: seed
+seed: ## Bootstrap administrator + demo data (needs a database)
+	@# `make dev` seeds itself; this is for a real database. The credentials are
+	@# development ones and are printed on purpose — a starter kit nobody can
+	@# log into is a starter kit nobody keeps.
+	BOOTSTRAP_ADMIN_EMAIL=$${BOOTSTRAP_ADMIN_EMAIL:-admin@example.test} \
+	BOOTSTRAP_ADMIN_PASSWORD=$${BOOTSTRAP_ADMIN_PASSWORD:-admin-password-1} \
+	STORAGE=postgres $(PNPM) exec tsx src/main.ts seed --demo
 
 .PHONY: psql
 psql: ## Interactive psql against the local database

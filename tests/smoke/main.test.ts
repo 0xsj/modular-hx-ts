@@ -3,8 +3,17 @@ import { fromRecord, load } from '../../src/shared/env/index.js';
 import { unwrap } from '../../src/shared/result/index.js';
 import { main, SCHEMA, wireKernel } from '../../src/main.js';
 
-/** Configuration the way `main` builds it, from a source a test controls. */
-const configured = () => unwrap(load(fromRecord({}), SCHEMA));
+/**
+ * Configuration the way `main` builds it, from a source a test controls.
+ *
+ * **`TRUSTED_PROXIES` has no default and this had no value for it**, so every
+ * case here started failing with *1 configuration problem* the moment the
+ * setting landed — which is the rule doing exactly its job, including on its
+ * own repository. `none` is the legal explicit answer for a process with no
+ * proxy in front, and a hermetic smoke test is that process.
+ */
+const REQUIRED = { TRUSTED_PROXIES: 'none' };
+const configured = () => unwrap(load(fromRecord(REQUIRED), SCHEMA));
 
 /**
  * The in-process composition smoke test.
@@ -19,6 +28,12 @@ const configured = () => unwrap(load(fromRecord({}), SCHEMA));
 
 /** Run a command with stdout captured. */
 async function run(argv: string[]): Promise<{ code: number; out: string }> {
+  // `main` reads the real environment, so the explicit answer goes there too.
+  // Restored below, because a test that leaks a variable is a test that makes
+  // the next one pass for the wrong reason.
+  const had = process.env['TRUSTED_PROXIES'];
+  process.env['TRUSTED_PROXIES'] = 'none';
+
   const lines: string[] = [];
   const write = vi
     .spyOn(process.stdout, 'write')
@@ -31,6 +46,8 @@ async function run(argv: string[]): Promise<{ code: number; out: string }> {
     return { code: await main(argv), out: lines.join('') };
   } finally {
     write.mockRestore();
+    if (had === undefined) delete process.env['TRUSTED_PROXIES'];
+    else process.env['TRUSTED_PROXIES'] = had;
   }
 }
 
@@ -143,6 +160,7 @@ describe('commands', () => {
       const before = { ...process.env };
       process.env['PORT'] = '80a0';
       process.env['LOG_LEVEL'] = 'shout';
+      process.env['TRUSTED_PROXIES'] = 'none';
 
       expect(await main(['serve'])).toBe(78); // EX_CONFIG
 
@@ -173,11 +191,53 @@ describe('commands', () => {
     const stderr = vi
       .spyOn(process.stderr, 'write')
       .mockImplementation(() => true);
+    const had = process.env['TRUSTED_PROXIES'];
+    process.env['TRUSTED_PROXIES'] = 'none';
 
     try {
+      // Configuration is loaded before the command is dispatched, so without
+      // the explicit answer this returns 78 and never reaches the usage line —
+      // a real ordering, not a test artefact.
       expect(await main(['nonsense'])).toBe(2);
     } finally {
       stderr.mockRestore();
+      if (had === undefined) delete process.env['TRUSTED_PROXIES'];
+      else process.env['TRUSTED_PROXIES'] = had;
+    }
+  });
+
+  it('refuses to SERVE without a trusted proxy set, and migrates without one', async () => {
+    // **The rule with the sharpest edge** — `../MODULES.md` §5. There is no
+    // default because both candidates are wrong: trusting forwarding headers
+    // hands every caller a limit-evasion primitive, and not trusting them makes
+    // the limiter global behind any load balancer.
+    //
+    // **Where the refusal lives is the part worth pinning.** It was a required
+    // schema entry, which made `migrate` refuse to run without a setting a
+    // migration cannot use — it answers no HTTP and mounts no limiter. *Unset
+    // fails boot* means boot, and boot is `serve`.
+    const had = process.env['TRUSTED_PROXIES'];
+    delete process.env['TRUSTED_PROXIES'];
+    const dsn = process.env['DATABASE_URL'];
+    delete process.env['DATABASE_URL'];
+
+    // `main` directly, not `run`: the helper supplies the explicit answer,
+    // which is the thing being removed here.
+    const write = vi
+      .spyOn(process.stdout, 'write')
+      .mockImplementation(() => true);
+
+    try {
+      expect(await main(['serve'])).toBe(78); // EX_CONFIG
+      // `migrate` reaches its own missing-DSN check rather than being refused
+      // over a setting it has no use for — same code, a different reason, and
+      // the difference is the point.
+      expect(await main(['migrate'])).toBe(78);
+    } finally {
+      write.mockRestore();
+      if (had === undefined) delete process.env['TRUSTED_PROXIES'];
+      else process.env['TRUSTED_PROXIES'] = had;
+      if (dsn !== undefined) process.env['DATABASE_URL'] = dsn;
     }
   });
 });

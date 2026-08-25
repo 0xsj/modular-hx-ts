@@ -124,10 +124,18 @@ export function problemFor(error: unknown, instance?: string): Problem {
   const issues = error instanceof AppError ? error.fields : [];
   const errors = fieldErrors(issues);
 
+  const named = error instanceof AppError ? error.problem : undefined;
+
   return {
     // A relative URI reference, so it works before anything is published and
     // stays stable if the docs move.
-    type: `/problems/${kind}`,
+    //
+    // **The named slug wins over the kind's**, because the catalogue in
+    // `../../../CONFORMANCE.md` §3.5 is finer than `Kind`: a wrong password and
+    // a missing header are both `Unauthenticated`, and a client branching on
+    // `type` has to tell them apart. Kebab, not the kind's snake — the cases
+    // spell it `not-found`.
+    type: `/problems/${named ?? kind.replace(/_/g, '-')}`,
     title: TITLES[kind],
     status,
     detail: detailFor(error, kind),
