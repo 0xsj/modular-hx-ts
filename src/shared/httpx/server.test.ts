@@ -33,6 +33,13 @@ const handler: Handler = async (exchange) => {
       return json(200, { ok: true, method: exchange.request.method });
     case '/echo-body':
       return text(200, await exchange.request.body());
+    case '/echo-body-twice': {
+      // **Two readers, which is what the chain actually does**: position 9
+      // fingerprints the canonical request and the route parser validates it.
+      const first = await exchange.request.body();
+      const second = await exchange.request.body();
+      return text(200, `${first}|${second}`);
+    }
     case '/slow':
       // Longer than the read-header timeout the guard test configures. A
       // handler that is thinking is not a peer that has gone quiet.
@@ -184,6 +191,26 @@ describe('both servers, one behaviour', () => {
     });
 
     expect(observed.body).toBe('hello');
+  });
+
+  it('lets TWO readers see the body, through either server', async () => {
+    // **A body is a stream and a stream is consumed once.** The Node adapter
+    // built a fresh promise per call, so the second reader waited for `end` on
+    // a message that had already ended — forever. Every `POST` carrying an
+    // `Idempotency-Key` hung against a real socket from the day position 9 was
+    // mounted, and nothing caught it: every other test supplies a
+    // `body: () => Promise.resolve(...)` that can be called repeatedly, and the
+    // Fastify adapter parses up front so it was never affected.
+    //
+    // Which is the sharper half: this suite exists to prove the two servers
+    // *agree*, and they disagreed on the one property nothing asked about.
+    const observed = await bothAgree('/echo-body-twice', {
+      method: 'POST',
+      headers: { 'content-type': 'text/plain' },
+      body: 'hello',
+    });
+
+    expect(observed.body).toBe('hello|hello');
   });
 
   it('puts a request id on every response, through either server', async () => {

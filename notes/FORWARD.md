@@ -11,5 +11,6 @@ telling you something — either the module is overdue, or the link was wishful.
 
 | Link | Will be | Why it is linked already |
 | --- | --- | --- |
+| [[exports]] | A showcase context | The first consumer of `work`, `blob` and `operations` together, and the thing five conformance cases point at. Linked from all three module notes because each was built for it |
 | [[openapi]] | An L4 module | The last unbuilt piece of the route registry's reason for existing: `httproute` declares each route's request and reply schemas *so that* something can render a document from them without reading a handler. Linked from `notes/patterns/httproute.md` and `notes/patterns/conditional.md`, and the note names the gap it will close — nothing checks today that a handler's status appears in its `replies` map |
 | [[validate]] | — | **Will not land.** `../MODULES.md` lists it for Go; here zod covers the boundary. Kept declared so the link in `notes/patterns/result.md` stays honest |

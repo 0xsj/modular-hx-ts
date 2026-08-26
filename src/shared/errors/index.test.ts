@@ -31,7 +31,7 @@ const issues: readonly FieldIssue[] = [
 ];
 
 describe('Kind', () => {
-  it('is decision 0010`s eleven, plus the one this repo proposes', () => {
+  it('is decision 0010`s eleven, plus the two this repo proposes', () => {
     // **The pin conformance case 50 needs.** `err_kind` is one of these or the
     // profile is filtering a vocabulary that does not exist. Written out rather
     // than derived from `Kind` itself, because a test that reads the value it
@@ -45,7 +45,8 @@ describe('Kind', () => {
         'not_found',
         'conflict',
         'precondition_failed',
-        'exhausted',
+        'precondition_required',
+        'rate_limited',
         'unavailable',
         'timeout',
         'canceled',

@@ -31,6 +31,8 @@ import {
   makeAuthorizer,
 } from '../../shared/authz/index.js';
 import { GRANT_ROLE, REVOKE_ROLE } from './app/command/roles.js';
+import { LIST_USERS } from './app/query/list-users.js';
+import { UPDATE_USER } from './app/command/update-user.js';
 import { type ChallengeMailer, type Hasher } from './app/ports.js';
 import { subjectOf } from './transport/http/routes.js';
 import {
@@ -1330,10 +1332,11 @@ describe('cases 16-17 — API keys', () => {
     );
 
     const loaded = present(user, 'the user');
-    const asSession = subjectOf({ user: loaded });
+    const asSession = subjectOf({ user: loaded, orgs: [] });
     const asKey = subjectOf({
       user: loaded,
       apiKey: key,
+      orgs: [],
     });
 
     // Same person, same roles, both ways.
@@ -1420,3 +1423,116 @@ function strip(body: string): unknown {
   void instance;
   return rest;
 }
+
+describe('the user listing — CONFORMANCE §3.5', () => {
+  /**
+   * Everybody may list. The real policy in `wire.ts` grants `user:list` to
+   * every role for the same reason: a record names an actor by id, and a caller
+   * who cannot resolve one is reading hex.
+   */
+  const listPolicy = unwrap(
+    compilePolicy({
+      member: [
+        { action: LIST_USERS, scope: Scope.Any },
+        { action: UPDATE_USER, scope: Scope.Any },
+      ],
+    }),
+  );
+  const listing = () =>
+    harness({
+      authorizer: makeAuthorizer(listPolicy),
+      defaultRoles: [role('member')],
+    });
+
+  it('refuses a cursor from another filter with the CATALOGUE slug', async () => {
+    // Conformance case 33, and the `type` is the part a client branches on:
+    // dropping the cursor and asking for the first page is a recovery, and a
+    // bare 400 does not tell anybody that. Asserted here because the runner
+    // cannot reach it — the corpus will not load against a target that has a
+    // bootstrap administrator, which every blueprint must have.
+    const h = listing();
+    const { token } = await signUp(h, 'ada@example.com');
+
+    // **Path and query separately.** `httpx` splits them at position 1; a test
+    // that puts a query string in `path` is testing a request the server never
+    // receives, and the router answers 404 because no route is spelled with a
+    // `?` in it.
+    const first = await h.call({
+      path: '/v1/users',
+      query: { limit: '1' },
+      ...bearer(token),
+    });
+    const cursor = (JSON.parse(first.body) as { cursor: { next?: string } })
+      .cursor.next;
+    const reused = await h.call({
+      path: '/v1/users',
+      query: { limit: '1', q: 'nobody', cursor: String(cursor) },
+      ...bearer(token),
+    });
+
+    expect(first.status).toBe(200);
+    expect(reused.status).toBe(400);
+    expect((JSON.parse(reused.body) as { type: string }).type).toBe(
+      '/problems/invalid-cursor',
+    );
+  });
+
+  it('hides a DISABLED account from the directory, and keeps it at its id', async () => {
+    // `users_visible` in the conformance corpus is a separate number from
+    // `users_total` for exactly this reason: the directory shows people who can
+    // act. The detail route still answers, because a caller who already knows
+    // the id is asking about a specific person and a 404 would make disabled
+    // indistinguishable from deleted.
+    const h = listing();
+    const admin = await signUp(h, 'admin@example.com');
+    const target = await signUp(h, 'gone@example.com');
+
+    const read = await h.call({
+      path: `/v1/users/${target.userId}`,
+      ...bearer(admin.token),
+    });
+    const tag = read.headers['etag'] ?? '';
+    await h.call({
+      method: 'PATCH',
+      path: `/v1/users/${target.userId}`,
+      headers: {
+        'content-type': 'application/json',
+        authorization: `Bearer ${admin.token}`,
+        'if-match': tag,
+      },
+      body: () => Promise.resolve(JSON.stringify({ status: 'disabled' })),
+    });
+
+    const listed = await h.call({
+      path: '/v1/users',
+      query: { limit: '50' },
+      ...bearer(admin.token),
+    });
+    const detail = await h.call({
+      path: `/v1/users/${target.userId}`,
+      ...bearer(admin.token),
+    });
+
+    const emails = (
+      JSON.parse(listed.body) as { items: { email: string }[] }
+    ).items.map((one) => one.email);
+    expect(emails).not.toContain('gone@example.com');
+    expect(emails).toContain('admin@example.com');
+    expect(detail.status).toBe(200);
+  });
+
+  it('answers an empty page with [] and no cursors — case 32', async () => {
+    // Null and `[]` are the same to a careless server and different to every
+    // client: one renders an empty state, the other crashes.
+    const h = listing();
+    const { token } = await signUp(h, 'ada@example.com');
+
+    const empty = await h.call({
+      path: '/v1/users',
+      query: { limit: '10', q: 'zzzz-no-such-user-zzzz' },
+      ...bearer(token),
+    });
+
+    expect(JSON.parse(empty.body)).toEqual({ items: [], cursor: {} });
+  });
+});

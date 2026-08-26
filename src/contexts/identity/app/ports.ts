@@ -14,6 +14,7 @@ import {
   type ApiKey,
   type ApiKeyId,
   type Challenge,
+  type ChallengeId,
   type Email,
   type Password,
   type PasswordHash,
@@ -34,6 +35,19 @@ import {
 export interface UserQuery {
   /** A substring match on address and display name. Absent lists everybody. */
   readonly q?: string;
+  /**
+   * Include disabled accounts. **Absent means no.**
+   *
+   * The directory shows people who can act. A disabled account is one an
+   * administrator has taken out of circulation, and listing it alongside the
+   * others is how somebody sends it work — the conformance corpus says the same
+   * thing by declaring `users_total` and `users_visible` separately.
+   *
+   * `GET /v1/users/{id}` still returns it: a caller who already knows the id is
+   * asking about a specific person, and answering 404 there would make a
+   * disabled account indistinguishable from a deleted one.
+   */
+  readonly includeDisabled?: boolean;
   /** Rows to return. The adapter fetches one more to detect a next page. */
   readonly limit: number;
   /** Exclusive lower bound — `(created_at, id)` of the last row seen. */
@@ -109,6 +123,14 @@ export interface Sessions {
 }
 
 export interface Challenges {
+  /**
+   * By id, which is what an emailed link carries.
+   *
+   * `secretlink` puts the identifier on the wire and authenticates it with a
+   * MAC **before** any lookup, so a forged id never reaches this. The
+   * fingerprint is then compared in constant time against the row.
+   */
+  byId(id: ChallengeId): Promise<Challenge | undefined>;
   byFingerprint(fingerprint: string): Promise<Challenge | undefined>;
   create(challenge: Challenge): Promise<void>;
   save(challenge: Challenge): Promise<void>;
@@ -225,3 +247,44 @@ export interface Work {
 export interface Transactor {
   within<T>(fn: (work: Work) => Promise<T>): Promise<T>;
 }
+
+/**
+ * A caller's roles **inside organizations**. **The port this context declares
+ * and does not implement.**
+ *
+ * > Identity learns a caller's org roles through a port the root wires, so
+ * > neither context imports the other, and `ORGS_ENABLED=false` is a working
+ * > configuration. — `CONTEXTS.md` §4
+ *
+ * **Declared by the consumer.** This is the first time in this repository that
+ * one context needs something another has, and the shape of the answer matters
+ * more than the feature: `identity` says what it needs, `orgs` satisfies it,
+ * and `src/wire.ts` is the only file that sees both. Neither imports the other,
+ * so `S6` holds — and it holds structurally rather than by inspection.
+ *
+ * **The absence of `orgs` is a valid configuration**, which is what proves the
+ * seam is real rather than decorative. When nothing is wired, the root supplies
+ * `noOrgs` below, every caller has no org roles, and the process boots and
+ * serves. If that configuration did not work, the two contexts would be coupled
+ * and the port would be a formality — `tests/smoke/orgs-disabled.test.ts`
+ * executes it, because a requirement satisfied in prose and never run is a
+ * requirement nobody has checked.
+ */
+export interface OrgRoles {
+  /** Empty when the caller belongs to nothing, or when `orgs` is not wired. */
+  of(
+    userId: string,
+  ): Promise<readonly { readonly orgId: string; readonly role: string }[]>;
+}
+
+/**
+ * What the root wires when `ORGS_ENABLED=false`.
+ *
+ * **Empty, never a refusal.** A caller with no organizations is an ordinary
+ * caller — the whole point of the flag is that the rest of the system does not
+ * change shape — so this answers the same way `orgs` answers for somebody who
+ * has joined nothing.
+ */
+export const noOrgs: OrgRoles = {
+  of: () => Promise.resolve([]),
+};

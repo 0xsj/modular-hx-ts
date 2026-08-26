@@ -186,8 +186,16 @@ export function outboxEvents(options: OutboxOptions): Outbox {
   /**
    * Claim a batch.
    *
-   * `for update skip locked` is what lets N relays run without coordinating:
-   * each takes rows the others have not, and none of them waits.
+   * **The lease is the correctness mechanism; `skip locked` is the latency
+   * one.** This comment used to credit `skip locked` with both, and a
+   * deliberate break showed otherwise: without it a second relay *blocks* on
+   * the row lock, then re-evaluates the lease predicate and finds the row
+   * taken — the same answer, arrived at more slowly. Without the **lease
+   * predicate**, two relays claim the same row and deliver it twice.
+   *
+   * Both belong here, and saying which does what is the difference between a
+   * comment and a claim: `tests/integration/events/outbox.test.ts` fails when
+   * the predicate goes and passes when `skip locked` does.
    */
   async function claim(): Promise<readonly Row[]> {
     return db.query<Row>(

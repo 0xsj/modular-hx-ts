@@ -20,6 +20,7 @@ import {
 } from '../../domain/index.js';
 import {
   type ApiKeys,
+  type OrgRoles,
   type Sessions,
   type Transactor,
   type Users,
@@ -37,9 +38,23 @@ export interface Caller {
    * refuse a key on key management, logout and password change.
    */
   readonly apiKey?: ApiKey | undefined;
+  /**
+   * The caller's roles **inside organizations** — `CONTEXTS.md` §4.
+   *
+   * Read through the `OrgRoles` port on every request, not cached on the
+   * session: conformance case 12 requires a withdrawn grant to take effect on
+   * the **next** request, and a role stored in a token is a role that outlives
+   * its withdrawal until the token expires.
+   *
+   * Empty when the caller belongs to nothing **and** when `orgs` is not wired.
+   * The two are deliberately indistinguishable here — that is what makes
+   * `ORGS_ENABLED=false` a working configuration rather than a degraded one.
+   */
+  readonly orgs: readonly { readonly orgId: string; readonly role: string }[];
 }
 
 export interface CallerDeps {
+  readonly orgRoles: OrgRoles;
   readonly users: Users;
   readonly sessions: Sessions;
   readonly apiKeys: ApiKeys;
@@ -97,7 +112,7 @@ export async function resolveCaller(
 
   await recordUse(deps, session, now);
 
-  return { user, session };
+  return { user, session, orgs: await deps.orgRoles.of(user.id) };
 }
 
 async function resolveKey(deps: CallerDeps, token: string): Promise<Caller> {
@@ -115,7 +130,10 @@ async function resolveKey(deps: CallerDeps, token: string): Promise<Caller> {
 
   await recordKeyUse(deps, apiKey, now);
 
-  return { user, apiKey };
+  // **A key carries its owner's org roles**, the same as a session. Case 17's
+  // scopes still subtract from whatever those confer — a scope is a narrowing,
+  // never a grant, and that is `authz`'s to compute rather than this file's.
+  return { user, apiKey, orgs: await deps.orgRoles.of(user.id) };
 }
 
 async function recordKeyUse(

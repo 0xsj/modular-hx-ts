@@ -55,7 +55,11 @@ export function scopeFor(authorizer: Authorizer, subject: Subject): Scope {
       // **Actor *or* subject.** Two different sets, and a caller needs both:
       // being disabled by an administrator is a record where somebody else is
       // the actor, and it is the one you most want to find.
-      return { kind: 'own', id: subjectId(subject) };
+      return {
+        kind: 'own',
+        id: subjectId(subject),
+        actor: subject.actor.toString(),
+      };
     case 'denied':
       return { kind: 'none' };
   }

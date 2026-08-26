@@ -87,8 +87,17 @@ export function conditional(options: ConditionalOptions): Middleware {
         // Thrown, so conformance case 29's 412 is built by the same mapper as
         // every other error and carries the same request id — position 9 is
         // below position 3 precisely so it is.
+        //
+        // **`version-conflict`, not `precondition-failed`.** The slug is the
+        // one a *repository* raises when an optimistic update loses, and that
+        // is deliberate: a caller who held a stale validator lost the same race
+        // whether the loss was detected here, from a header, or three layers
+        // down, from a `where version = $n` that matched no row. One slug means
+        // one branch in the client — re-read and retry — instead of two that
+        // mean the same thing and are reached by different paths.
         throw preconditionFailed(
           'a precondition on this request does not hold',
+          { problem: 'version-conflict' },
         );
 
       case 'not-modified':
@@ -108,20 +117,38 @@ export function conditional(options: ConditionalOptions): Middleware {
     }
 
     const response = await next(exchange);
+    if (response.headers['etag'] !== undefined) {
+      // A handler that set its own knows something this position does not.
+      return response;
+    }
 
     // **Case 30's first half.** A GET that returns no `ETag` is a GET no client
     // can revalidate, so the tag the evaluation just used is the tag the
-    // response carries. Never overwritten: a handler that set its own knows
-    // something this position does not.
-    if (
-      safe &&
-      validator !== undefined &&
-      response.headers['etag'] === undefined
-    ) {
+    // response carries.
+    if (safe && validator !== undefined) {
       return {
         ...response,
         headers: { ...response.headers, etag: formatETag(validator.etag) },
       };
+    }
+
+    // **A successful write answers with the NEW tag**, re-derived rather than
+    // reused: the one computed before the handler described the representation
+    // that has just been replaced, and attaching it would hand a client a
+    // validator that is stale the moment it arrives.
+    //
+    // The reason to bother is chaining. A client that writes and then writes
+    // again otherwise has to `GET` in between purely to learn a tag the server
+    // already knew — conformance case 29 asks for it on the mutating step for
+    // exactly that.
+    if (!safe && validator !== undefined && response.status < 300) {
+      const fresh = await options.validators(exchange);
+      if (fresh !== undefined) {
+        return {
+          ...response,
+          headers: { ...response.headers, etag: formatETag(fresh.etag) },
+        };
+      }
     }
 
     return response;

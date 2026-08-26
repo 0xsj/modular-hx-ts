@@ -30,10 +30,14 @@ import { type Telemetry } from '../../shared/telemetry/index.js';
 import { type Validators } from '../../shared/conditional/index.js';
 import { type Role } from './domain/index.js';
 import { register } from './app/command/register.js';
+import { listUsers } from './app/query/list-users.js';
+import { userView } from './transport/http/views.js';
 import {
   type Caller,
   type IdentityApp,
   type IdentityDeps,
+  type OrgRoles,
+  noOrgs,
   resolveCaller,
 } from './app/index.js';
 import { argon2Hasher } from './infra/hasher.js';
@@ -84,6 +88,14 @@ export interface IdentityOptions {
     route: { method: string; path: string },
     status: number,
   ) => void;
+  /**
+   * The caller's roles inside organizations — `CONTEXTS.md` §4.
+   *
+   * Declared as a port in `app/ports.ts` and satisfied by `orgs`, wired by the
+   * composition root. Absent means `noOrgs`: every caller belongs to nothing,
+   * and the process boots and serves exactly as before.
+   */
+  readonly orgRoles?: OrgRoles;
   /** Injected for tests that need a cheap hash; production takes the default. */
   readonly hasher?: IdentityDeps['hasher'];
   /**
@@ -111,6 +123,25 @@ export interface Identity extends IdentityApp {
   /** `conditional`'s validator — this context is its first implementer. */
   readonly validators: Validators;
   readonly migrations: typeof identityMigrations;
+  /**
+   * A page of users, for anything outside this context that needs the rows.
+   *
+   * **The same query the API serves**, so an export cannot show a row the
+   * directory hides — and it is a *page* rather than a list, because a reader
+   * that materialised every user would put the whole dataset in memory before
+   * a streaming write ever started.
+   *
+   * No `Subject`: the caller has already been authorized by whatever asked, and
+   * a check here would be a second policy in a second place. The composition
+   * root is the only thing that can reach it.
+   */
+  listUsers(page: {
+    readonly limit: number;
+    readonly cursor?: string;
+  }): Promise<{
+    readonly items: readonly Record<string, unknown>[];
+    readonly next?: string;
+  }>;
   /** Only in memory mode, for a test that wants to look inside. */
   readonly store?: IdentityStore;
   /**
@@ -190,6 +221,10 @@ export function makeIdentity(options: IdentityOptions): Identity {
     telemetry: options.telemetry,
     sessionTtlMs: options.sessionTtlMs ?? DEFAULT_TTL_MS,
     challengeTtlMs: options.challengeTtlMs ?? DEFAULT_CHALLENGE_TTL_MS,
+    // **`noOrgs` is the default, and it is a working configuration.** §4: the
+    // absence of `orgs` must boot and serve, which is the only mechanical test
+    // that the cross-context port is real rather than decorative.
+    orgRoles: options.orgRoles ?? noOrgs,
   };
 
   const app: IdentityApp = { deps };
@@ -228,6 +263,28 @@ export function makeIdentity(options: IdentityOptions): Identity {
     migrations: identityMigrations,
     ...(store === undefined ? {} : { store }),
 
+    async listUsers(page) {
+      const origin = (options.origins ?? makeOrigins(options.ids)).forCli(
+        'export',
+      );
+      const found = await listUsers(
+        deps,
+        // Already authorized by whatever asked; see the interface.
+        subject({ actor: origin.actor, roles: [], tenant: 'system' }),
+        {
+          limit: page.limit,
+          ...(page.cursor === undefined ? {} : { cursor: page.cursor }),
+        },
+        { skipAuthorization: true },
+      );
+      return {
+        items: found.items.map(
+          (one) => userView(one) as unknown as Record<string, unknown>,
+        ),
+        ...(found.next === undefined ? {} : { next: found.next }),
+      };
+    },
+
     async ensureUser(input: EnsureUser) {
       // The seed runs as a command, outside any request, so it opens its own
       // origin — `PROVENANCE.md`'s carriage rule at the one boundary a CLI has.
@@ -265,6 +322,8 @@ export {
   type Caller,
   type IdentityApp,
   type IdentityDeps,
+  type OrgRoles,
+  noOrgs,
 } from './app/index.js';
 export { identityMigrations } from './infra/postgres/schema.js';
 /**

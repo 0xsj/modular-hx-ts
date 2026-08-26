@@ -1,20 +1,15 @@
 /**
  * `make routes` — every route this process serves.
  *
- * Read off the same tables `wire` mounts, so it cannot drift from what is
- * actually served. The collection asked five blueprints for their inventories
- * side by side; a count is not one, and a hand-written list is a different
- * document that happens to look like one.
+ * **`allRoutes()` from the composition root**, which is the one list `wire`
+ * mounts. This file kept its own copy for a while, and so did `make openapi`
+ * and `make curl` — three lists of *which context tables exist*, and the first
+ * time that mattered was the first time it was wrong.
  */
 
-import { type IdentityDeps } from '../src/contexts/identity/index.js';
-import { identityRoutes } from '../src/contexts/identity/transport/http/routes.js';
-import { auditRoutes } from '../src/contexts/audit/transport/http/routes.js';
+import { allRoutes } from '../src/wire.js';
 
-const routes = [
-  ...identityRoutes({ deps: {} as IdentityDeps }, { defaultRoles: [] }),
-  ...auditRoutes({ caller: () => undefined } as never),
-];
+const routes = allRoutes();
 
 const rows = routes
   .map((route) => ({

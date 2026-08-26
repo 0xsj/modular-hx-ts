@@ -39,7 +39,11 @@ import {
 } from '../ports.js';
 import { type Challenges } from '../ports.js';
 import { type Session } from '../../domain/index.js';
-import { fingerprintOf, mintSecret } from '../tokens.js';
+import {
+  issue as issueLink,
+  matches,
+  readable,
+} from '../../../../shared/secretlink/index.js';
 import {
   type Authenticated,
   type AuthenticateDeps,
@@ -112,7 +116,7 @@ export async function requestChallenge(
   if (!user?.enabled) return;
 
   const id = challengeId(deps.ids.uuid());
-  const secret = mintSecret(deps.random);
+  const link = unwrap(issueLink({ id, random: deps.random, mac: deps.mac }));
   const now = deps.clock.now();
   const tag = unwrap(
     deps.mac.tag(challengeMessage(id, user.id, input.purpose)),
@@ -122,7 +126,7 @@ export async function requestChallenge(
     id,
     user.id,
     input.purpose,
-    secret.fingerprint,
+    link.fingerprint,
     tag,
     now,
     new Date(now.getTime() + deps.challengeTtlMs),
@@ -150,7 +154,7 @@ export async function requestChallenge(
 
   // **Sent after the commit.** A message about a row that rolled back is a link
   // that does not work, and the recipient has no way to know why.
-  await deps.mailer.send(address, input.purpose, secret.raw, challenge.payload);
+  await deps.mailer.send(address, input.purpose, link.token, challenge.payload);
 }
 
 /**
@@ -166,18 +170,26 @@ async function claim(
   purpose: Purpose,
   provenance: Provenance,
 ): Promise<Challenge> {
-  const found = await work.challenges.byFingerprint(fingerprintOf(secret));
+  // **Authenticated before the lookup.** `secretlink` puts the id on the wire
+  // and tags it, so a forged identifier is refused by arithmetic rather than by
+  // a table probe — one request per guess, answering whether the row exists,
+  // was the shape the tag exists to remove.
+  const link = readable(secret, deps.mac);
+  if (link === undefined) throw challengeRefused();
+
+  const found = await work.challenges.byId(challengeId(link.id));
   if (found === undefined) throw challengeRefused();
 
-  // **The MAC proves the row is ours and unaltered.** The fingerprint lookup
-  // already proved possession of the secret; this proves the row was issued by
-  // us for *this* user and *this* purpose, so a write that flipped a purpose
-  // column cannot turn a magic link into a password reset.
+  // Possession, in constant time.
+  if (!matches(link, found.secretFingerprint)) throw challengeRefused();
+
+  // **And the stored tag proves the row was not edited.** The wire tag bound
+  // the id; this binds the *contents* — user and purpose — so a write that
+  // flipped a purpose column cannot turn a magic link into a password reset.
+  //
+  // A plain comparison on the purpose itself: it is a short, public, closed
+  // value and the caller supplied it by choosing an endpoint.
   const expected = challengeMessage(found.id, found.userId, found.purpose);
-  // A plain comparison on the purpose: it is a short, public, closed value and
-  // the caller supplied it by choosing an endpoint. `constantTimeEqual` here
-  // would be cargo cult — the secret was already compared by the fingerprint
-  // lookup, and `Mac.verify` is constant-time over the tag.
   if (found.purpose !== purpose || !deps.mac.verify(expected, found.tag)) {
     throw challengeRefused();
   }
@@ -398,10 +410,13 @@ export async function consumeLink(
   input: { readonly token: string; readonly password?: string | undefined },
   provenance: Provenance,
 ): Promise<{ readonly session?: Session; readonly token?: string }> {
-  const found = await deps.challenges.byFingerprint(fingerprintOf(input.token));
   // **A peek, not a claim.** Nothing is consumed here; `claim` inside each
   // command below does that transactionally. Answering from this read would be
   // a check-then-act with the whole command in the window.
+  const link = readable(input.token, deps.mac);
+  if (link === undefined) throw challengeRefused();
+
+  const found = await deps.challenges.byId(challengeId(link.id));
   if (found === undefined) throw challengeRefused();
 
   switch (found.purpose) {

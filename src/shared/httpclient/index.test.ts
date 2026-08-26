@@ -98,7 +98,7 @@ describe('status maps to Kind', () => {
     expect(kindForStatus(503)).toBe(Kind.Unavailable);
     // Exhausted, not Unavailable: rate limiting is not an outage, and a
     // dashboard grouping by err_kind must be able to tell them apart.
-    expect(kindForStatus(429)).toBe(Kind.Exhausted);
+    expect(kindForStatus(429)).toBe(Kind.RateLimited);
     expect(kindForStatus(401)).toBe(Kind.Unauthenticated);
     expect(kindForStatus(403)).toBe(Kind.Forbidden);
     expect(kindForStatus(404)).toBe(Kind.NotFound);

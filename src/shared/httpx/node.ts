@@ -37,6 +37,35 @@ export function requestFrom(
 ): Request {
   const url = new URL(message.url ?? '/', 'http://placeholder');
 
+  /** The one read. `body()` hands every caller the same promise. */
+  let read: Promise<string> | undefined;
+
+  const collect = (): Promise<string> =>
+    new Promise<string>((resolve, reject) => {
+      const chunks: Buffer[] = [];
+      let size = 0;
+
+      message.on('data', (chunk: Buffer) => {
+        size += chunk.byteLength;
+        // Bounded for the same reason `httpclient` bounds a response:
+        // `Content-Length` is a claim, not a limit.
+        if (size > maxBodyBytes) {
+          message.destroy();
+          reject(internal('request body exceeded the limit'));
+          return;
+        }
+        chunks.push(chunk);
+      });
+      message.on('end', () => {
+        resolve(Buffer.concat(chunks).toString('utf8'));
+      });
+      message.on('error', (error: unknown) => {
+        reject(
+          internal('the request body could not be read', { cause: error }),
+        );
+      });
+    });
+
   return {
     method: message.method ?? 'GET',
     path: url.pathname,
@@ -44,27 +73,18 @@ export function requestFrom(
     headers: headersOf(message),
     peer: message.socket.remoteAddress ?? 'unknown',
 
-    body: () =>
-      new Promise<string>((resolve, reject) => {
-        const chunks: Buffer[] = [];
-        let size = 0;
-
-        message.on('data', (chunk: Buffer) => {
-          size += chunk.byteLength;
-          // Bounded for the same reason `httpclient` bounds a response:
-          // `Content-Length` is a claim, not a limit.
-          if (size > maxBodyBytes) {
-            message.destroy();
-            reject(internal('request body exceeded the limit'));
-            return;
-          }
-          chunks.push(chunk);
-        });
-        message.on('end', () => {
-          resolve(Buffer.concat(chunks).toString('utf8'));
-        });
-        message.on('error', reject);
-      }),
+    // **Read once, memoized.** A body is a stream and a stream is consumed
+    // exactly once — the second reader waits for `end` on a message that
+    // already ended, forever.
+    //
+    // Two positions read it: `idempotency` at position 9 fingerprints the
+    // canonical request, and the route parser validates it. So **every POST
+    // carrying an `Idempotency-Key` hung** against a real socket, from the day
+    // position 9 was mounted. Nothing caught it because every test supplies a
+    // `body: () => Promise.resolve(...)` that can be called repeatedly, and no
+    // route was exercised with a key over a real connection until the
+    // conformance runner sent one.
+    body: () => (read ??= collect()),
   };
 }
 

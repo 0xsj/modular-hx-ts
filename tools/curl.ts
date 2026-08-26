@@ -185,6 +185,42 @@ function steps(paths: ReadonlySet<string>): readonly Step[] {
         body: { role: 'auditor' },
       }),
     }),
+    ...when('POST /v1/orgs', {
+      what: 'Found an organization, and keep its id',
+      why: 'The founder is its first owner, in the same transaction.',
+      command: [
+        `ORG_NAME="Journey Co $RANDOM"`,
+        capture(
+          'ORG_ID',
+          'id',
+          curl('POST', '/v1/orgs', {
+            auth: '$TOKEN',
+            rawBody: `'{"name":"'"$ORG_NAME"'"}'`,
+            silent: true,
+          }),
+        ),
+      ].join('\n'),
+    }),
+    ...when('GET /v1/orgs/:id', {
+      what: 'Read it, and see YOUR role in it',
+      why: 'A role is per organization — the same person is owner here and member elsewhere.',
+      command: curl('GET', '/v1/orgs/$ORG_ID', { auth: '$TOKEN' }),
+    }),
+    ...when('DELETE /v1/orgs/:id/members/me', {
+      what: 'Try to leave as the only owner — 409',
+      why: 'An organization keeps at least one owner, enforced over the whole roster.',
+      command: curl('DELETE', '/v1/orgs/$ORG_ID/members/me', {
+        auth: '$TOKEN',
+      }),
+    }),
+    ...when('POST /v1/orgs/:id/invitations', {
+      what: 'Invite somebody',
+      why: 'Single-use, MAC-tagged, and the token is emailed rather than returned.',
+      command: curl('POST', '/v1/orgs/$ORG_ID/invitations', {
+        auth: '$TOKEN',
+        body: { email: 'newcomer@example.test', role: 'member' },
+      }),
+    }),
     ...when('GET /v1/audit', {
       what: 'Read what all of that did',
       why: 'Policy-scoped: an administrator sees everything, a member sees their own.',
@@ -246,6 +282,8 @@ const { identityRoutes } =
   await import('../src/contexts/identity/transport/http/routes.js');
 const { auditRoutes } =
   await import('../src/contexts/audit/transport/http/routes.js');
+const { orgRoutes } =
+  await import('../src/contexts/orgs/transport/http/routes.js');
 
 const mounted = new Set(
   [
@@ -256,6 +294,7 @@ const mounted = new Set(
       },
     ),
     ...auditRoutes({ caller: () => undefined } as never),
+    ...orgRoutes({ deps: {} as never, caller: () => undefined }),
   ].map((route) => `${route.method} ${route.path}`),
 );
 

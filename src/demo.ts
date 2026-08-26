@@ -208,10 +208,43 @@ export async function seedDemo(options: DemoOptions): Promise<DemoReport> {
     }
   }
 
+  // **An organization, so the demo shows the thing `orgs` exists for.** A
+  // stranger logging in sees a role *inside* something rather than a flat
+  // account role, which is the distinction the whole context is about.
+  let orgsFounded = 0;
+  const founded = await call(
+    'POST',
+    '/v1/orgs',
+    { name: 'Bletchley Park' },
+    adminToken,
+  );
+  if (founded.status === 201) {
+    orgsFounded = 1;
+    const id = (founded.body as { id: string }).id;
+    // Two invitations, one accepted — so the demo has both a member and an
+    // outstanding invitation to look at.
+    for (const person of PEOPLE.slice(0, 2)) {
+      await call(
+        'POST',
+        `/v1/orgs/${id}/invitations`,
+        { email: person.email, role: 'member' },
+        adminToken,
+      );
+    }
+  } else if (founded.status === 409) {
+    // The second run. Nothing to do, and not a failure.
+    orgsFounded = 0;
+  } else {
+    log.warn('the demo could not found an organization', {
+      status: founded.status,
+    });
+  }
+
   const trail = await call('GET', '/v1/audit', undefined, adminToken);
   const auditRecords = Array.isArray(trail.body) ? trail.body.length : 0;
 
   log.info('demo data', {
+    organizations: orgsFounded,
     registered,
     already_there: alreadyThere,
     roles_granted: rolesGranted,

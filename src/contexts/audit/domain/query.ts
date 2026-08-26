@@ -79,5 +79,20 @@ export function auditQuery(raw: AuditQuery): AuditQuery {
  */
 export type Scope =
   | { readonly kind: 'all' }
-  | { readonly kind: 'own'; readonly id: string }
+  | {
+      readonly kind: 'own';
+      /** The subject id, as a payload names it — a bare user id. */
+      readonly id: string;
+      /**
+       * The **actor string**, as an envelope names it — `user:<id>`.
+       *
+       * Two fields rather than one, because the two halves of *actor or
+       * subject* are spelled differently in a record and comparing one value
+       * against both was silently a comparison against one. Every test passed
+       * because `identity`'s events name the acting user as their payload
+       * subject too — so the actor half had never matched anything, and it
+       * took an `orgs` event whose subject is an **organization** to notice.
+       */
+      readonly actor: string;
+    }
   | { readonly kind: 'none' };

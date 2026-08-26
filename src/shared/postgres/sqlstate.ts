@@ -53,9 +53,9 @@ const CODES: Readonly<Record<string, Kind>> = {
 
   // 53 — insufficient resources. Not retryable-by-kind: hammering a pool that
   // is already full is how a bad minute becomes a bad hour.
-  '53100': Kind.Exhausted, // disk_full
-  '53200': Kind.Exhausted, // out_of_memory
-  '53300': Kind.Exhausted, // too_many_connections
+  '53100': Kind.RateLimited, // disk_full
+  '53200': Kind.RateLimited, // out_of_memory
+  '53300': Kind.RateLimited, // too_many_connections
 
   // 25 — invalid transaction state.
   '25P02': Kind.Internal, // in_failed_sql_transaction — a bug in how it was driven

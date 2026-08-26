@@ -548,6 +548,72 @@ const supplying =
 
 const ok: Handler = () => Promise.resolve(json(200, { id: 1 }));
 
+describe('case 29 — a successful write answers with the NEW validator', () => {
+  /**
+   * A validator that moves when the resource does, which is the only way to
+   * tell a re-read from a reuse. `supplying(validator)` hands back the same
+   * value forever and would pass whether the middleware re-derived the tag or
+   * echoed the one it evaluated — so the double is the test here.
+   */
+  const moving = (): Validators => {
+    let n = 0;
+    return () => ({ etag: strongETag(`v${String(++n)}`) });
+  };
+
+  it('re-derives the tag rather than echoing the one it checked', async () => {
+    // The first call is the precondition check (`"v1"`), the second is the
+    // fresh derivation after the handler. Echoing would answer `"v1"`, and a
+    // client that stored it would fail its next If-Match against a resource
+    // nobody else had touched.
+    const response = await callable(
+      ok,
+      moving(),
+    )({
+      method: 'PATCH',
+      headers: { 'if-match': '"v1"' },
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers['etag']).toBe('"v2"');
+  });
+
+  it('leaves a handler`s own tag alone', async () => {
+    const tagged: Handler = () =>
+      Promise.resolve({
+        status: 200,
+        headers: { 'content-type': 'application/json', etag: '"handler"' },
+        body: '{}',
+      });
+
+    const response = await callable(
+      tagged,
+      moving(),
+    )({
+      method: 'PATCH',
+      headers: { 'if-match': '"v1"' },
+    });
+
+    expect(response.headers['etag']).toBe('"handler"');
+  });
+
+  it('adds nothing to a write that failed', async () => {
+    // A 409 describes no representation, so a validator on one is a tag for a
+    // state that does not exist.
+    const conflicted: Handler = () =>
+      Promise.resolve({ status: 409, headers: {}, body: '{}' });
+
+    const response = await callable(
+      conflicted,
+      moving(),
+    )({
+      method: 'PATCH',
+      headers: { 'if-match': '"v1"' },
+    });
+
+    expect(response.headers['etag']).toBeUndefined();
+  });
+});
+
 describe('case 30 — GET returns an ETag, If-None-Match returns 304 and no body', () => {
   it('puts the validator on a GET', async () => {
     const response = await callable(ok, supplying(validator))();
@@ -613,7 +679,11 @@ describe('case 29 — a stale If-Match is 412, through the same mapper', () => {
     expect(response.status).toBe(412);
     expect(response.headers['content-type']).toBe('application/problem+json');
     expect(JSON.parse(response.body)).toMatchObject({
-      type: '/problems/precondition-failed',
+      // **The slug a repository raises too.** `CONFORMANCE.md` 4.6.30 names
+      // one problem for a lost race, and the caller cannot tell — nor should
+      // have to — whether the loss was caught at position 9 or at a `where
+      // version = $n` that matched no row.
+      type: '/problems/version-conflict',
       status: 412,
     });
     expect(response.headers['x-request-id']).toMatch(/^[0-9a-f-]{36}$/);

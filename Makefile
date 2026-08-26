@@ -10,6 +10,7 @@
 #   make db-up && migrate   postgres                  schema applies
 #   make test-integration   postgres                  both adapters, one suite
 #   make e2e                postgres + real binary    journeys over HTTP
+#   make openapi            zero dependencies         regenerate docs/openapi.json
 #   make ci                 zero dependencies         everything a push must pass
 
 SHELL       := /bin/bash
@@ -54,6 +55,16 @@ help: ## List targets
 install: ## Install dependencies from the lockfile
 	$(PNPM) install --frozen-lockfile
 
+# **The build stamp, from git, for anything run out of a working tree.**
+#
+# `buildinfo` fails open on a missing stamp and reports `unknown` — right for a
+# container whose CI forgot, wrong for a `/version` that `CONFORMANCE.md` §3.9
+# makes the evidence a report names its binary with. `unknown` identifies
+# nothing, and identifying the process is the entire point of the endpoint.
+STAMP = APP_COMMIT=$$(git rev-parse HEAD 2>/dev/null || echo unknown) \
+        APP_VERSION=$$(git describe --tags --always --dirty 2>/dev/null || echo dev) \
+        APP_DIRTY=$$(git diff --quiet 2>/dev/null && echo false || echo true)
+
 .PHONY: dev
 dev: ## Boot, seed and serve — zero external dependencies
 	@# **Rung 0a.** `TRUSTED_PROXIES=none` is the legal explicit answer for a
@@ -62,7 +73,7 @@ dev: ## Boot, seed and serve — zero external dependencies
 	@# seed` would be a *different* process and a different empty map, which is
 	@# the trap this criterion exists to catch.
 	@echo "→ http://127.0.0.1:$${PORT:-15430}  ·  in another terminal: make curl"
-	STORAGE=memory TRUSTED_PROXIES=none SEED_ON_BOOT=demo $(PNPM) run dev
+	$(STAMP) STORAGE=memory TRUSTED_PROXIES=none SEED_ON_BOOT=demo $(PNPM) run dev
 
 .PHONY: curl
 curl: ## Print the journey as runnable requests — generated, never written
@@ -73,6 +84,24 @@ curl: ## Print the journey as runnable requests — generated, never written
 .PHONY: routes
 routes: ## List every route this process serves — method, path, auth
 	@$(PNPM) exec tsx tools/routes.ts
+
+.PHONY: statuses
+statuses: ## Which declared statuses were ever observed — make statuses LOG=serve.log
+	@# Reports, never fails. `../ENFORCEMENT.md`: a declared status is a claim
+	@# nothing checks, and the converse of S11 cannot be decided statically.
+	@test -n "$(LOG)" || { echo "usage: make statuses LOG=<access log>" >&2; exit 2; }
+	$(PNPM) exec tsx tools/statuses.ts $(LOG)
+
+.PHONY: openapi
+openapi: ## Regenerate docs/openapi.json from the route registry
+	@$(PNPM) exec tsx tools/openapi.ts
+
+.PHONY: openapi-check
+openapi-check: ## Fail if the committed spec no longer matches the registry
+	@# The third of `../MODULES.md`'s three words. A schema change that alters
+	@# the published contract fails the build instead of shipping quietly —
+	@# without this, `openapi` is decoration.
+	@$(PNPM) exec tsx tools/openapi.ts --check
 
 .PHONY: build
 build: ## Compile to dist/
@@ -121,7 +150,7 @@ audit: ## Known vulnerabilities in the dependency tree
 	$(PNPM) audit --audit-level high
 
 .PHONY: ci
-ci: fmt-check lint typecheck test build ## Everything a push must pass without infrastructure
+ci: fmt-check lint typecheck test openapi-check build ## Everything a push must pass without infrastructure
 	@echo "ci: green"
 
 ## Rungs 1–3 — real infrastructure

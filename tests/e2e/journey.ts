@@ -56,8 +56,17 @@ interface Problem {
   readonly instance: string;
 }
 
+interface OrgReply {
+  readonly id: string;
+  readonly name: string;
+  readonly slug: string;
+  readonly status: 'active' | 'archived';
+  readonly your_role?: string;
+}
+
 interface RecordReply {
   readonly event: string;
+  readonly actor: string;
   readonly subject?: string;
   readonly requestId: string;
   readonly correlationId: string;
@@ -120,6 +129,13 @@ export function theJourney(options: JourneyOptions): void {
     'identity.session.revoked',
   ] as const;
 
+  /** What the organization chapter must leave behind. Waited for, then asserted. */
+  const ORG_EVENTS = [
+    'orgs.organization.founded',
+    'orgs.membership.joined',
+    'orgs.invitation.sent',
+  ] as const;
+
   const PASSWORD = 'correct horse battery staple';
   const NEXT_PASSWORD = 'a different horse entirely!';
 
@@ -180,6 +196,28 @@ export function theJourney(options: JourneyOptions): void {
       // Never rate-limited: an orchestrator polling readiness must not be able to
       // throttle itself into a restart loop.
       expect(live.headers['ratelimit-limit']).toBeUndefined();
+    });
+
+    it('names the binary at /version, anonymously — §3.9', async () => {
+      // **This 404'd for six phases.** `shared/buildinfo` exported
+      // `versionPayload` and its own header said *served at `/version`*, and
+      // nothing mounted it — a module documenting a caller it did not have.
+      //
+      // §3.9 turned it from a convenience into evidence: the ports in this
+      // collection are adjacent, one blueprint reported numbers taken from a
+      // sibling's process, and this endpoint is how a report proves which
+      // binary answered. So it is checked from the outside, against the real
+      // listener, rather than by asserting the function exists.
+      http.step('Which binary is this');
+
+      const version = await http.send<{ name: string; commit: string }>(
+        'GET',
+        '/version',
+      );
+
+      expect(version.status).toBe(200);
+      expect(version.body.name).toBe('modular-hx-ts');
+      expect(version.body.commit).not.toBe('');
     });
   });
 
@@ -335,6 +373,144 @@ export function theJourney(options: JourneyOptions): void {
     });
   });
 
+  describe('an organization, and a role inside it', () => {
+    let orgId = '';
+    let token = '';
+
+    beforeAll(async () => {
+      const back = await http.send<TokenReply>('POST', '/v1/sessions', {
+        body: { email, password: NEXT_PASSWORD },
+      });
+      token = http.secret(back.body.access_token);
+    });
+
+    it('founds one, and the founder is its first owner', async () => {
+      http.step('Found an organization');
+
+      const founded = await http.send<OrgReply>('POST', '/v1/orgs', {
+        headers: { authorization: `Bearer ${token}` },
+        body: { name: `Journey ${String(Date.now())}` },
+      });
+
+      expect(founded.status).toBe(201);
+      expect(founded.body.your_role).toBe('owner');
+      orgId = founded.body.id;
+    });
+
+    it('shows the caller their OWN role in it', async () => {
+      http.step('Read the organization');
+
+      const read = await http.send<OrgReply>('GET', `/v1/orgs/${orgId}`, {
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(read.status).toBe(200);
+      expect(read.body.your_role).toBe('owner');
+      // **The second `Validators` implementer, running.** Until `orgs` existed
+      // the root passed identity's straight through, and this route declared a
+      // tag nothing produced.
+      expect(read.headers['etag']).toMatch(/^"sha256:[0-9a-f]{64}"$/);
+    });
+
+    it('refuses to let the last owner leave — the set-spanning invariant', async () => {
+      http.step('The last owner cannot leave');
+
+      const refused = await http.send<Problem>(
+        'DELETE',
+        `/v1/orgs/${orgId}/members/me`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+
+      expect(refused.status).toBe(409);
+      expect(refused.body.type).toBe('/problems/last-owner');
+    });
+
+    it('invites somebody, and the invitation is single use', async () => {
+      http.step('Invite');
+
+      const invited = await http.send('POST', `/v1/orgs/${orgId}/invitations`, {
+        headers: { authorization: `Bearer ${token}` },
+        body: {
+          email: `invitee+${String(Date.now())}@example.test`,
+          role: 'member',
+        },
+      });
+      const pending = await http.send<{ id: string }[]>(
+        'GET',
+        `/v1/orgs/${orgId}/invitations`,
+        { headers: { authorization: `Bearer ${token}` } },
+      );
+
+      expect(invited.status).toBe(202);
+      expect(pending.status).toBe(200);
+      expect(pending.body.length).toBeGreaterThan(0);
+      // **No secret anywhere in the view.** Nothing here reads one.
+      expect(JSON.stringify(pending.body)).not.toContain('fingerprint');
+    });
+
+    it('lists the caller`s organizations, and nobody else`s', async () => {
+      http.step('My organizations');
+
+      const mine = await http.send<OrgReply[]>('GET', '/v1/orgs', {
+        headers: { authorization: `Bearer ${token}` },
+      });
+
+      expect(mine.status).toBe(200);
+      expect(mine.body.map((one) => one.id)).toContain(orgId);
+    });
+
+    it('is 404, not 403, for a stranger — no existence oracle', async () => {
+      http.step('Somebody else`s organization');
+
+      const stranger = await http.send<TokenReply>('POST', '/v1/users', {
+        body: {
+          email: `stranger+${String(Date.now())}@example.test`,
+          password: 'a stranger password here',
+        },
+      });
+      expect(stranger.status).toBe(201);
+
+      const session = await http.send<TokenReply>('POST', '/v1/sessions', {
+        body: {
+          email: (stranger.body as unknown as { email: string }).email,
+          password: 'a stranger password here',
+        },
+      });
+      const theirs = http.secret(session.body.access_token);
+
+      const refused = await http.send('GET', `/v1/orgs/${orgId}`, {
+        headers: { authorization: `Bearer ${theirs}` },
+      });
+
+      expect(refused.status).toBe(404);
+    });
+
+    it('records what happened in the audit log', async () => {
+      http.step('The organization in the audit trail');
+
+      const records = await eventually(
+        'the organization records',
+        () =>
+          http.send<RecordReply[]>('GET', '/v1/audit', {
+            headers: { authorization: `Bearer ${token}` },
+          }),
+        // **Every event the assertions need, not just the first.** Waiting on
+        // one and asserting three is the same race that flaked the identity
+        // chapter: the relay claims a batch and nothing promises the order two
+        // records reach the table in. It flaked once here before this, which is
+        // the number of times a race like this announces itself.
+        (answer) =>
+          answer.status === 200 &&
+          ORG_EVENTS.every((event) =>
+            answer.body.some((one) => one.event === event),
+          ),
+      );
+
+      const events = records.body.map((one) => one.event);
+      for (const event of ORG_EVENTS) expect(events).toContain(event);
+    });
+  });
+
   describe('what the journey left in the audit log', () => {
     let token = '';
 
@@ -370,10 +546,17 @@ export function theJourney(options: JourneyOptions): void {
       const events = records.body.map((one) => one.event);
       for (const event of EXPECTED) expect(events).toContain(event);
 
-      // **Case 37: policy-scoped.** A `member` sees their own trail and nobody
-      // else's, so every record here is about this user.
+      // **Case 37: policy-scoped**, and the scope is *actor or subject* — not
+      // *subject*. This asserted `subject === me` and passed for six phases,
+      // because every `identity` event names the acting user as its payload
+      // subject too. An `orgs` event whose subject is an **organization**
+      // broke it, and the assertion was the thing that was wrong: it had been
+      // accidentally asserting that the actor half of the scope did nothing.
       for (const one of records.body) {
-        expect(one.subject).toBe(seen.userId);
+        expect(
+          one.actor === `user:${seen.userId}` || one.subject === seen.userId,
+          `${one.event} is neither acted by nor about this caller`,
+        ).toBe(true);
       }
     });
 

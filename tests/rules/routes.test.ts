@@ -12,6 +12,8 @@
  * annotation.
  */
 
+import { readdirSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import {
   type ChainShape,
@@ -21,6 +23,8 @@ import {
 import { type IdentityDeps } from '../../src/contexts/identity/index.js';
 import { identityRoutes } from '../../src/contexts/identity/transport/http/routes.js';
 import { auditRoutes } from '../../src/contexts/audit/transport/http/routes.js';
+import { orgRoutes } from '../../src/contexts/orgs/transport/http/routes.js';
+import { ROUTED_CONTEXTS, allRoutes } from '../../src/wire.js';
 
 /**
  * The chain this repository's composition root builds.
@@ -45,6 +49,12 @@ const identity = identityRoutes(
   },
 );
 
+const orgs = orgRoutes({
+  // Never called: `orgRoutes` closes over these and no handler is run here.
+  deps: {} as never,
+  caller: () => undefined,
+});
+
 const audit = auditRoutes({
   // Never called: `auditRoutes` closes over these and the handler is not run.
   caller: () => undefined,
@@ -54,14 +64,27 @@ const audit = auditRoutes({
 const exemptOf = (routes: readonly Declared[]): readonly string[] =>
   routes.filter((one) => one.auth === 'anonymous').map((one) => one.path);
 
+/**
+ * **Every route the root mounts**, not the three this file happened to import.
+ *
+ * `exports` and `webhooks` were both absent from the list below while their
+ * routes were live, so `S11` was proving a property about a subset and
+ * reporting it as a property of the repository. `allRoutes()` is the one list
+ * `wire` mounts, and taking it from there is what makes the next context
+ * checked by default rather than when somebody remembers.
+ */
+const everything = allRoutes() as readonly Declared[];
+
 describe('S11 — every status the chain can produce is declared', () => {
   it.each([
     ['identity', identity as readonly Declared[]],
     ['audit', audit as readonly Declared[]],
+    ['orgs', orgs as readonly Declared[]],
+    ['every mounted route', everything],
   ])('%s declares everything reachable through the chain', (_name, routes) => {
     const undeclared = undeclaredStatuses(routes, {
       ...CHAIN,
-      exempt: exemptOf([...identity, ...audit] as readonly Declared[]),
+      exempt: exemptOf(everything),
       guarded: routes === identity,
     });
 
@@ -82,5 +105,34 @@ describe('S11 — every status the chain can produce is declared', () => {
 
     expect(Object.keys(anyRoute.replies)).not.toContain('500');
     expect(Object.keys(anyRoute.replies)).not.toContain('503');
+  });
+});
+
+describe('the published contract covers every context', () => {
+  it('names every directory under src/contexts', () => {
+    // **`allRoutes()` has been forgotten twice.** `exports` shipped with four
+    // routes missing from `docs/openapi.json`, and `webhooks` with eight — and
+    // `make openapi-check` was green both times, because it compares the
+    // committed file against a generator that was itself incomplete. A check
+    // that regenerates its own expectation cannot catch an omission in the
+    // thing doing the regenerating.
+    //
+    // This is the outside view: the filesystem says which contexts exist.
+    const onDisk = readdirSync(join(process.cwd(), 'src', 'contexts'), {
+      withFileTypes: true,
+    })
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort();
+
+    expect([...ROUTED_CONTEXTS].sort()).toEqual(onDisk);
+  });
+
+  it('actually mounts a route from each of them', () => {
+    // The list above could name a context and `allRoutes` still omit it — the
+    // two are maintained a few lines apart. Every context here owns at least
+    // one path, so an empty contribution is detectable without hard-coding
+    // which paths belong to whom.
+    expect(allRoutes().length).toBeGreaterThanOrEqual(ROUTED_CONTEXTS.length);
   });
 });

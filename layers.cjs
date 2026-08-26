@@ -34,6 +34,10 @@ const LAYERS = [
       'pagination',
       'buildinfo',
       'redact',
+      // Promoted out of `identity/app/` when `orgs` needed the identical
+      // mechanics for an invitation: `S6` makes a context's code unreachable
+      // from the next one, so the choice was a second copy or a shared module.
+      'token',
     ],
   },
   {
@@ -56,13 +60,40 @@ const LAYERS = [
     intent:
       'I/O. Every module here has a port, a memory adapter, a real adapter, ' +
       "and one contract suite both pass. That is the layer's definition.",
-    modules: ['postgres', 'events', 'jobs', 'lock', 'mailer', 'httpclient'],
+    modules: [
+      'postgres',
+      'events',
+      'jobs',
+      'lock',
+      'mailer',
+      'httpclient',
+      // Object storage. A port, a memory twin, a filesystem adapter and one
+      // contract suite both pass — which is this layer's whole definition.
+      'blob',
+      // A durable queue. Enqueued inside the caller's transaction, which is why
+      // it is here rather than beside `jobs`: it needs `postgres`'s handle.
+      'work',
+    ],
   },
   {
     id: 'L3',
     name: 'capability',
     intent: 'Makes a real decision, knows no domain.',
-    modules: ['authz', 'tenant', 'crypto', 'classification', 'flags'],
+    modules: [
+      'authz',
+      'tenant',
+      'crypto',
+      'classification',
+      'flags',
+      // 202 + Location + poll + cancel. L3 because it makes a real decision —
+      // a terminal state never moves — and knows no domain: `kind` is the
+      // owning context's word and this module never reads it.
+      'operations',
+      // The out-of-band link around `token`: an id and a MAC tag on the wire.
+      // Above L0 because it needs `crypto`; separate from `token` because a
+      // session has no MAC and no journey outside the system.
+      'secretlink',
+    ],
   },
   {
     id: 'L4',

@@ -13,6 +13,7 @@
  * looks like from every other direction.
  */
 
+import { buildInfo } from '../../src/shared/buildinfo/index.js';
 import { describe, expect, it } from 'vitest';
 import { memoryTelemetry } from '../../src/shared/telemetry/index.js';
 import { systemClock } from '../../src/shared/clock/index.js';
@@ -43,6 +44,7 @@ const random = systemRandom();
 
 function root() {
   return wire({
+    build: buildInfo({}),
     clock,
     ids: systemIds(clock, (count) => random.bytes(count)),
     random,

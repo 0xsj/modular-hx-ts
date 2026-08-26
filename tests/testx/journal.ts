@@ -6,14 +6,28 @@
  * assigned — and writes it to `artifacts/e2e-journal.md`, so the output of
  * `make e2e` is a document a person can read rather than a green tick.
  *
- * **Secrets are redacted on the way in, not on the way out.** A bearer token in
- * a committed artifact is a bearer token in the repository; `redact` below
- * replaces them with a stable alias (`<token:1>`), which keeps the journal
- * legible — the same alias appears everywhere the same token does, so *this
- * request used the session from step 2* is still visible.
+ * **Both directions, and the gap was one of them.** Scrubbing was added when a
+ * bearer token turned up in a *response*, and the fix looked complete because
+ * the thing it was written for stopped appearing. Nobody looked the other way:
+ * every password the journey typed went into the artifact in the clear, in a
+ * file whose entire purpose is being handed to somebody.
+ *
+ * Two mechanisms now, and the second is the one that does not need remembering:
+ *
+ * - **An alias table.** A caller registers a value with `secret()` and every
+ *   occurrence becomes a stable alias — `<token:1>` — so *this request reused
+ *   the session from step 2* stays readable. Aliases rather than `[redacted]`
+ *   for exactly that reason: a transcript full of redactions is documentation,
+ *   and one that keeps its shape is a tool.
+ * - **Field names, harvested automatically.** Anything `redact` considers
+ *   sensitive — `password`, `token`, `secret`, `authorization` — is registered
+ *   the moment it is seen, in a request body or a response body alike. The
+ *   journey no longer has to remember, which is what let the hole open: a
+ *   password invented inline three tests later was never registered anywhere.
  */
 
 import { mkdirSync, writeFileSync } from 'node:fs';
+import { isSensitiveKey } from '../../src/shared/redact/index.js';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -41,6 +55,32 @@ class Aliases {
     const alias = `<token:${String(this.#seen.size + 1)}>`;
     this.#seen.set(secret, alias);
     return alias;
+  }
+
+  /**
+   * Register every value under a sensitive field name, anywhere in a structure.
+   *
+   * **The half that needs no discipline.** `redact` already owns the question
+   * *is this field name a secret*, and reusing its answer is what keeps the two
+   * from disagreeing. Registering rather than replacing means the value is then
+   * aliased **everywhere it appears**, including in exchanges recorded before
+   * it was first seen — a password sent in step 9 is masked in step 2's body
+   * too, because the render pass runs over the whole journal at the end.
+   */
+  harvest(value: unknown): void {
+    if (Array.isArray(value)) {
+      for (const one of value) this.harvest(one);
+      return;
+    }
+    if (value === null || typeof value !== 'object') return;
+
+    for (const [key, one] of Object.entries(value as Record<string, unknown>)) {
+      if (typeof one === 'string' && one !== '' && isSensitiveKey(key)) {
+        this.of(one);
+        continue;
+      }
+      this.harvest(one);
+    }
   }
 
   /** Replace every alias-worthy value found anywhere in a structure. */
@@ -123,6 +163,12 @@ export class Journal {
     const headers: Record<string, string> = { ...init.headers };
     if (init.body !== undefined) headers['content-type'] = 'application/json';
 
+    // **Before anything is recorded, and on the way in.** A body is harvested
+    // whether it is going out or coming back; headers too, which is where an
+    // `authorization` lives.
+    this.#aliases.harvest(init.body);
+    this.#aliases.harvest(headers);
+
     const response = await fetch(`${this.#base}${path}`, {
       method,
       headers,
@@ -140,17 +186,15 @@ export class Journal {
     }
 
     const responseHeaders = Object.fromEntries(response.headers.entries());
-    this.#exchanges.push({
-      step: this.#step,
+
+    this.record({
       method,
       path,
-      requestHeaders: this.#aliases.scrub(headers),
-      ...(init.body === undefined
-        ? {}
-        : { requestBody: this.#aliases.scrub(init.body) }),
+      requestHeaders: headers,
+      ...(init.body === undefined ? {} : { requestBody: init.body }),
       status: response.status,
-      responseHeaders: this.#aliases.scrub(responseHeaders),
-      responseBody: this.#aliases.scrub(body),
+      responseHeaders,
+      responseBody: body,
       requestId: responseHeaders['x-request-id'] ?? '(none)',
     });
 
@@ -159,6 +203,35 @@ export class Journal {
       body: body as T,
       headers: responseHeaders,
     };
+  }
+
+  /**
+   * Write one exchange down. **The only path into the journal**, so `send` and
+   * anything testing the scrubber exercise the same wiring.
+   *
+   * Public for that reason: a test reaching into the private alias table would
+   * pass while this method's harvesting was wrong, which is precisely the shape
+   * of the bug it guards — a scrubber that works and is not called.
+   */
+  record(exchange: Omit<Exchange, 'step'>): void {
+    // **Both directions, before anything is recorded.** Field names are
+    // harvested from a request body and a response body alike, and from the
+    // headers on each side, which is where an `authorization` lives.
+    this.#aliases.harvest(exchange.requestBody);
+    this.#aliases.harvest(exchange.requestHeaders);
+    this.#aliases.harvest(exchange.responseBody);
+    this.#aliases.harvest(exchange.responseHeaders);
+
+    this.#exchanges.push({
+      step: this.#step,
+      ...exchange,
+      requestHeaders: this.#aliases.scrub(exchange.requestHeaders),
+      ...(exchange.requestBody === undefined
+        ? {}
+        : { requestBody: this.#aliases.scrub(exchange.requestBody) }),
+      responseHeaders: this.#aliases.scrub(exchange.responseHeaders),
+      responseBody: this.#aliases.scrub(exchange.responseBody),
+    });
   }
 
   get exchanges(): readonly Exchange[] {

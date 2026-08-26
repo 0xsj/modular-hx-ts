@@ -835,11 +835,17 @@ function requirePrecondition(headers: Readonly<Record<string, string>>): void {
   const supplied = headers['if-match'];
   if (supplied === undefined || supplied.trim() === '') {
     throw new AppError(
-      Kind.Invalid,
+      Kind.PreconditionRequired,
       'this request requires an If-Match header naming the version you read',
       // Not `precondition_failed`: 412 means *your validator is stale*, which
       // is a different and more hopeful thing to tell a caller than *you sent
-      // none*. The slug carries the distinction the status cannot.
+      // none*.
+      //
+      // **And not `Invalid` either, which is what this was.** The slug has said
+      // `precondition-required` since it was written, next to a 400 — RFC 6585
+      // gives that condition its own status and the `Kind` vocabulary had no
+      // value for it, so the note here used to claim the status *could not*
+      // carry the distinction. It can. ADR 0013.
       { problem: 'precondition-required' },
     );
   }

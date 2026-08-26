@@ -78,19 +78,35 @@ export interface UserPage {
   readonly prev?: string;
 }
 
+export interface ListOptions {
+  /**
+   * Skip the permission check. **Only the composition root may pass this.**
+   *
+   * A caller that has already been authorized by something else — the export
+   * worker, which runs with no request and no subject — would otherwise need a
+   * second policy in a second place, and the second one is the one that drifts.
+   * It is a named parameter rather than a separate function so the bypass is
+   * visible at every call site that uses it, and there is exactly one.
+   */
+  readonly skipAuthorization?: boolean;
+}
+
 export async function listUsers(
   deps: ListDeps,
   subject: Subject,
   input: ListInput,
+  options: ListOptions = {},
 ): Promise<UserPage> {
   // **Read, not merely present.** `M4` requires the parameter; this requires
   // the permission — an unwired policy refuses, because `denyAll` is the
   // default authorizer.
-  const decision = deps.authorizer.allow(subject, LIST_USERS, {
-    type: 'user',
-    id: '*',
-  });
-  if (!decision.allowed) throw forbidden(`not permitted: ${decision.reason}`);
+  if (options.skipAuthorization !== true) {
+    const decision = deps.authorizer.allow(subject, LIST_USERS, {
+      type: 'user',
+      id: '*',
+    });
+    if (!decision.allowed) throw forbidden(`not permitted: ${decision.reason}`);
+  }
 
   // Clamps rather than refuses: a client asking for 10 000 gets the maximum,
   // because a page size is a hint and a refusal here teaches nothing.

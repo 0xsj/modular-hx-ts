@@ -116,8 +116,13 @@ export function postgresAuditLog(db: DB): AuditLog {
       // A caller narrowing to `actor=somebody-else` must still see nothing, and
       // that is only true if the scope is a separate clause.
       if (scope.kind === 'own') {
-        const id = bind(scope.id);
-        where.push(`(actor = ${id} or subject = ${id})`);
+        // **Two parameters, not one.** An envelope spells an actor `user:<id>`
+        // and a payload spells a subject as a bare id, so one value compared
+        // against both columns was silently a comparison against one — and the
+        // actor half had never matched anything.
+        where.push(
+          `(actor = ${bind(scope.actor)} or subject = ${bind(scope.id)})`,
+        );
       }
 
       if (query.actor !== undefined) where.push(`actor = ${bind(query.actor)}`);

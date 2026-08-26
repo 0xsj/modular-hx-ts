@@ -109,6 +109,8 @@ function memoryChallenges(store: IdentityStore): Challenges {
     state === undefined ? undefined : ChallengeAggregate.from(state);
 
   return {
+    byId: (id) => Promise.resolve(hydrate(store.challenges.get(id))),
+
     byFingerprint: (fingerprint) =>
       Promise.resolve(
         hydrate(
@@ -181,6 +183,7 @@ function memoryUsers(store: IdentityStore): Users {
 
     list(query) {
       const matches = (row: UserState): boolean => {
+        if (!row.enabled && query.includeDisabled !== true) return false;
         if (query.q === undefined || query.q === '') return true;
         const needle = query.q.toLowerCase();
         return (

@@ -136,7 +136,13 @@ integration('outbox', () => {
   });
 
   describe('the relay', () => {
-    it('claims with a lease, so a second relay skips the row', async () => {
+    it('delivers once when two relays drain the same event', async () => {
+      // **This is not the lease test its name used to claim.** It passed with
+      // the lease predicate removed, with `for update skip locked` removed, and
+      // with both removed — because the first relay *deletes* the row on
+      // success, so the second's re-evaluated claim finds nothing whatever the
+      // locking says. It asserts a true and worthwhile outcome for a cause it
+      // does not name. The lease is tested below, by holding a delivery open.
       const a = outboxEvents({ db: schema.db, clock, ids, random, owner: 'a' });
       const b = outboxEvents({ db: schema.db, clock, ids, random, owner: 'b' });
 
@@ -162,6 +168,51 @@ integration('outbox', () => {
 
       expect(ra + rb).toBe(1);
       expect(handled).toBe(1);
+    });
+
+    it('LEASES the row, so a relay drains nothing while another holds it', async () => {
+      // The mechanism the test above was named for, exercised by holding the
+      // first relay inside its handler — which is the only window in which the
+      // lease is the thing standing between two relays and a double delivery.
+      // Removing `lease_until is null or lease_until < now()` fails this.
+      const a = outboxEvents({ db: schema.db, clock, ids, random, owner: 'a' });
+      const b = outboxEvents({ db: schema.db, clock, ids, random, owner: 'b' });
+
+      let release: () => void = () => undefined;
+      const held = new Promise<void>((resume) => {
+        release = resume;
+      });
+
+      a.subscribe({
+        name: 'slow',
+        pattern: 'identity.*',
+        handle: () => held,
+      });
+      // **A different subscriber name on purpose.** Sharing one would let the
+      // per-(subscriber, event) dedupe row mask a second claim, which is
+      // exactly how the test above ended up proving something else.
+      let alsoHandled = 0;
+      b.subscribe({
+        name: 'other',
+        pattern: 'identity.*',
+        handle: () => {
+          alsoHandled += 1;
+        },
+      });
+
+      await a.publish(registered, fakeProvenance());
+
+      const first = a.dispatcher.drain();
+      // Long enough for A to have claimed and entered its handler.
+      await new Promise((resume) => setTimeout(resume, 200));
+
+      const second = await b.dispatcher.drain();
+
+      release();
+      await first;
+
+      expect(second).toBe(0);
+      expect(alsoHandled).toBe(0);
     });
 
     it('keeps backoff and ownership in separate columns', async () => {

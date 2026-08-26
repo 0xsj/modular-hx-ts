@@ -28,7 +28,16 @@ export const KEY_HEADER = 'idempotency-key';
  * A client that cannot tell the difference cannot tell a successful retry from
  * a second execution, which is the whole thing it asked to be protected from.
  */
-export const REPLAY_HEADER = 'idempotent-replayed';
+/**
+ * **`idempotency-replayed`, and it was `idempotency-replayed`.**
+ *
+ * The adjective, not the noun — a spelling nobody would notice until something
+ * read it. `CONFORMANCE.md`'s case 25 asserts `Idempotency-Replayed`, and the
+ * conformance runner reported it absent while it was being emitted under a name
+ * one letter-group away. Header names are case-insensitive and **not**
+ * spelling-insensitive.
+ */
+export const REPLAY_HEADER = 'idempotency-replayed';
 
 /**
  * A key, and everything that scopes it.

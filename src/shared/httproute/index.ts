@@ -332,17 +332,44 @@ export function router<C = Caller>(options: RouterOptions<C>) {
   };
 }
 
+/**
+ * The matching route. **Most specific wins, never first declared.**
+ *
+ * `orgs` found this the expensive way: `DELETE /v1/orgs/{id}/members/me` and
+ * `DELETE /v1/orgs/{id}/members/{userId}` both match the same request, and a
+ * first-match router answered with whichever was written higher in the file —
+ * so *leave this organization* became *remove the member called `me`*, and the
+ * symptom was a 404 that looked like a missing member rather than a routing
+ * bug.
+ *
+ * Declaration order is the wrong tiebreak because it makes correctness depend
+ * on the order somebody typed routes in, and nothing anywhere says so. Counting
+ * literal segments is the standard rule and needs no discipline to hold: a
+ * literal beats a parameter because it describes exactly one request, and a
+ * parameter describes many.
+ */
 function find<C>(
   routes: readonly AnyRoute<C>[],
   method: string,
   path: string,
 ): Match<C> | undefined {
+  let best: Match<C> | undefined;
+  let bestScore = -1;
+
   for (const route of routes) {
     if (route.method !== method.toUpperCase()) continue;
     const params = matches(route.path, path);
-    if (params !== undefined) return { route, params };
+    if (params === undefined) continue;
+
+    const score = route.path
+      .split('/')
+      .filter((segment) => segment !== '' && !segment.startsWith(':')).length;
+    if (score > bestScore) {
+      best = { route, params };
+      bestScore = score;
+    }
   }
-  return undefined;
+  return best;
 }
 
 function methodOrPath<C>(

@@ -68,8 +68,42 @@ export const Kind = {
    * **Proposed, not settled.** See ADR 0011.
    */
   PreconditionFailed: 'precondition_failed',
+  /**
+   * The route requires a precondition and the caller supplied none.
+   *
+   * RFC 6585 §3 — *the origin server requires the request to be conditional*.
+   * Distinct again from `PreconditionFailed`: that one says *the validator you
+   * sent is stale*, this says *you sent none, and this route will not let you
+   * write blind*. The caller's next move is the most different of the three —
+   * read the resource, take its `ETag`, and repeat the write with `If-Match`.
+   *
+   * **It was `Invalid`, and 400 was wrong.** `CONFORMANCE.md` §3.5 marks
+   * `PATCH /v1/users/{id}` *`If-Match` required*, so a client that omits one is
+   * doing something the surface anticipates and can recover from — but 400
+   * tells it the request was malformed, which invites a developer to go looking
+   * at their JSON. The slug said `precondition-required` beside a status that
+   * did not; the comment beside it claimed *the slug carries the distinction
+   * the status cannot*, which was simply untrue — 428 is the status, and the
+   * vocabulary had no value for it.
+   *
+   * **Proposed, not settled.** See ADR 0013, which follows 0011 exactly.
+   */
+  PreconditionRequired: 'precondition_required',
   /** A limit was reached — rate limit, quota, budget. */
-  Exhausted: 'exhausted',
+  /**
+   * **`rate_limited`, and it was `exhausted` for six phases.**
+   *
+   * Decision 0010 fixed the vocabulary at eleven values and named this one;
+   * this repository spelled it `exhausted`, which reads better and is not the
+   * word. The divergence was reported twice and never resolved either way, and
+   * it stayed invisible because nothing published a `Kind` on the wire — until
+   * problem types became `/problems/<slug>` and a conformance run printed
+   * `/problems/rate-limited` at a runner expecting the collection's spelling.
+   *
+   * The constructor keeps the name `exhausted`, which is what call sites read;
+   * only the value crosses a boundary.
+   */
+  RateLimited: 'rate_limited',
   /** A dependency is down or degraded. Nothing is wrong with the request. */
   Unavailable: 'unavailable',
   /** A deadline passed before the work finished. */
@@ -183,7 +217,8 @@ export const forbidden = constructorFor(Kind.Forbidden);
 export const notFound = constructorFor(Kind.NotFound);
 export const conflict = constructorFor(Kind.Conflict);
 export const preconditionFailed = constructorFor(Kind.PreconditionFailed);
-export const exhausted = constructorFor(Kind.Exhausted);
+export const preconditionRequired = constructorFor(Kind.PreconditionRequired);
+export const exhausted = constructorFor(Kind.RateLimited);
 export const unavailable = constructorFor(Kind.Unavailable);
 export const timeout = constructorFor(Kind.Timeout);
 export const canceled = constructorFor(Kind.Canceled);

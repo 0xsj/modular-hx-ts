@@ -24,8 +24,9 @@ const STATUS: Readonly<Record<Kind, number>> = {
   // Case 29. Proposed rather than settled — see ADR 0011 — but the mapping is
   // not in doubt: RFC 9110 §15.5.13 names 412 for exactly this.
   [Kind.PreconditionFailed]: 412,
+  [Kind.PreconditionRequired]: 428,
   // `exhausted` is this collection's name for rate limited.
-  [Kind.Exhausted]: 429,
+  [Kind.RateLimited]: 429,
   [Kind.Unavailable]: 503,
   [Kind.Timeout]: 504,
   // A caller that hung up. 499 is nginx's, not an RFC's, and it is the only
@@ -75,7 +76,8 @@ const TITLES: Readonly<Record<Kind, string>> = {
   [Kind.NotFound]: 'Not found',
   [Kind.Conflict]: 'Conflict',
   [Kind.PreconditionFailed]: 'Precondition failed',
-  [Kind.Exhausted]: 'Too many requests',
+  [Kind.PreconditionRequired]: 'Precondition required',
+  [Kind.RateLimited]: 'Too many requests',
   [Kind.Unavailable]: 'Service unavailable',
   [Kind.Timeout]: 'Timed out',
   [Kind.Canceled]: 'Client closed request',

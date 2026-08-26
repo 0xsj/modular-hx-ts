@@ -232,7 +232,8 @@ describe('problem mapping', () => {
     // Case 29. Proposed rather than settled; see ADR 0011.
     expect(statusFor(Kind.PreconditionFailed)).toBe(412);
     expect(statusFor(Kind.Unprocessable)).toBe(422);
-    expect(statusFor(Kind.Exhausted)).toBe(429);
+    expect(statusFor(Kind.RateLimited)).toBe(429);
+    expect(statusFor(Kind.PreconditionRequired)).toBe(428);
     expect(statusFor(Kind.Canceled)).toBe(499);
     expect(statusFor(Kind.Internal)).toBe(500);
     expect(statusFor(Kind.Unavailable)).toBe(503);
@@ -245,9 +246,9 @@ describe('problem mapping', () => {
     // convention. Every kind maps, and no kind maps twice.
     const statuses = Object.values(Kind).map(statusFor);
 
-    expect(statuses).toHaveLength(12);
+    expect(statuses).toHaveLength(13);
     expect(statuses.every((status) => Number.isInteger(status))).toBe(true);
-    expect(new Set(statuses).size).toBe(12);
+    expect(new Set(statuses).size).toBe(13);
   });
 
   it('distinguishes unprocessable from invalid in the body, not only the status', () => {

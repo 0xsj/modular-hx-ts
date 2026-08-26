@@ -72,7 +72,7 @@ export function kindForStatus(status: number): Kind {
     case 408:
       return Kind.Timeout;
     case 429:
-      return Kind.Exhausted;
+      return Kind.RateLimited;
     default:
       return status >= 400 ? Kind.Invalid : Kind.Internal;
   }
@@ -93,7 +93,7 @@ export function isWorthRepeating(kind: Kind): boolean {
   return (
     kind === Kind.Unavailable ||
     kind === Kind.Timeout ||
-    kind === Kind.Exhausted
+    kind === Kind.RateLimited
   );
 }
 

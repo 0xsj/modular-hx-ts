@@ -127,9 +127,21 @@ export type Middleware = (
   next: Handler,
 ) => Promise<Response>;
 
-export const json = (status: number, value: unknown): Response => ({
+/**
+ * A JSON response, optionally with more headers.
+ *
+ * The third parameter arrived with the first `202`: a `Location` is part of the
+ * answer rather than something to bolt on after, and a caller building the
+ * object by hand to add one is a caller who has stopped using the helper — and
+ * will eventually forget the content type.
+ */
+export const json = (
+  status: number,
+  value: unknown,
+  headers: Readonly<Record<string, string>> = {},
+): Response => ({
   status,
-  headers: { 'content-type': 'application/json' },
+  headers: { 'content-type': 'application/json', ...headers },
   body: JSON.stringify(value),
 });
 

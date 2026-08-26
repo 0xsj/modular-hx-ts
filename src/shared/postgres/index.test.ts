@@ -33,7 +33,7 @@ describe('SQLSTATE maps to Kind', () => {
     expect(kindForSqlState('25P03')).toBe(Kind.Timeout); // idle_in_transaction
     // Not retryable by kind: hammering a full pool is how a bad minute becomes
     // a bad hour.
-    expect(kindForSqlState('53300')).toBe(Kind.Exhausted); // too_many_connections
+    expect(kindForSqlState('53300')).toBe(Kind.RateLimited); // too_many_connections
   });
 
   it('treats the whole 08 class as Unavailable', () => {

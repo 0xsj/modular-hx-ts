@@ -23,6 +23,7 @@ import {
   minutes,
   since,
   type Clock,
+  type Sleeps,
   systemClock,
 } from './shared/clock/index.js';
 import { digest } from './shared/digest/index.js';
@@ -90,7 +91,12 @@ import {
  * and `main` shrinks to argument parsing and process lifetime.
  */
 interface Kernel {
-  readonly clock: Clock;
+  /**
+   * **`Sleeps` too**, which `systemClock` has always returned — the field was
+   * just typed narrower than the value. `wire` needs both now that `retry` is
+   * reachable from a context.
+   */
+  readonly clock: Clock & Sleeps;
   readonly random: Random;
   readonly ids: IdGenerator;
   readonly retry: Retrier;
@@ -220,6 +226,25 @@ export const SCHEMA = {
   // migration answers no HTTP and mounts no limiter. §5's *unset fails boot*
   // means boot, and boot is `serve`; the refusal lives there.
   trustedProxies: optional(text('TRUSTED_PROXIES')),
+  /**
+   * Mount `orgs`. **`false` must boot and serve** — `../CONTEXTS.md` §4.
+   *
+   * The flag exists to be turned off: it is the only mechanical test that
+   * `identity`'s `OrgRoles` port is a real seam rather than a formality, and a
+   * requirement satisfied in prose and never executed is one nobody has
+   * checked.
+   */
+  orgsEnabled: flag('ORGS_ENABLED', { fallback: true }),
+  exportsEnabled: flag('EXPORTS_ENABLED', { fallback: true }),
+  webhooksEnabled: flag('WEBHOOKS_ENABLED', { fallback: true }),
+  /**
+   * Where export artifacts are written. Absent keeps them in memory.
+   *
+   * A directory rather than a bucket, because `I1` says memory mode needs no
+   * external dependency and this blueprint has no object-store account. S3 is
+   * the same port with a different `put`.
+   */
+  blobRoot: optional(text('BLOB_ROOT')),
   // The rate one process allows while the shared store is unreachable.
   // **Configured, never derived from a replica count**: a process must not be
   // told its own fleet size. Absent means the full limit, and during an outage
@@ -341,6 +366,7 @@ async function serve(source: Source, config: AppConfig): Promise<number> {
         : undefined;
     const wired = wire({
       clock,
+      build,
       ids: kernel.ids,
       random: kernel.random,
       telemetry: kernel.telemetry,
@@ -350,6 +376,10 @@ async function serve(source: Source, config: AppConfig): Promise<number> {
       // Throws when unset, which for a root means the process refuses to boot
       // rather than starting with a limiter that is either evadable or global.
       trust,
+      orgs: config.orgsEnabled,
+      exports: config.exportsEnabled,
+      webhooks: config.webhooksEnabled,
+      ...(config.blobRoot === undefined ? {} : { blobRoot: config.blobRoot }),
       rateLimit: config.rateLimit,
       ...(config.degradedLimit === undefined
         ? {}
@@ -394,6 +424,23 @@ async function serve(source: Source, config: AppConfig): Promise<number> {
           // One last pass, so an event published by the final request is not
           // left in the table for the next deploy to find.
           await wired.events.dispatcher.drain();
+        },
+      });
+    }
+
+    // **The export worker, as a component.** Registered before `http`, so
+    // reverse-order shutdown stops accepting requests first and lets the worker
+    // finish what those requests asked for.
+    if (wired.worker !== undefined) {
+      const loop = wired.worker;
+      lifecycle.add({
+        name: 'exports-worker',
+        start: async () => {
+          await loop.start();
+        },
+        stop: async () => {
+          await loop.stop();
+          await loop.drain();
         },
       });
     }
@@ -475,7 +522,14 @@ async function serve(source: Source, config: AppConfig): Promise<number> {
       // The **bound** port, not the configured one: with `PORT=0` the kernel
       // picks, and a test needs to know which.
       port: bound?.port ?? config.port,
-      migrations: wired.migrations.length,
+      // **`_known`, and the suffix is the whole point.** `serve` does not
+      // migrate — `migrate` is a separate command precisely so a deploy can
+      // apply schema before it rolls pods. This field is the manifest size,
+      // and spelled `migrations=12` on a *ready* line it read as *twelve
+      // applied*: a boot against a freshly dropped schema announced healthy,
+      // reported twelve, and then failed every request, because the number
+      // describing the code was mistaken for a number describing the database.
+      migrations_known: wired.migrations.length,
     });
 
     // A second signal means the operator has stopped waiting.
@@ -693,6 +747,7 @@ async function seed(
     try {
       const wired = wire({
         clock: kernel.clock,
+        build: readBuildInfo(fromProcess()),
         ids: kernel.ids,
         random: kernel.random,
         telemetry: kernel.telemetry,
@@ -703,6 +758,9 @@ async function seed(
         // trusted set to protect and nothing to refuse over. `wire` still
         // builds a chain, and this is the honest value for one nobody serves.
         trust: NO_PROXIES,
+        orgs: config.orgsEnabled,
+        exports: config.exportsEnabled,
+        webhooks: config.webhooksEnabled,
         rateLimit: config.rateLimit,
         ...(db === undefined ? {} : { db }),
       });

@@ -157,6 +157,19 @@ const segmentsOf = (key: string): readonly string[] =>
 /** Below this length a fragment is a word, not a substring. See above. */
 const WHOLE_SEGMENT_AT_OR_BELOW = 3;
 
+/**
+ * Is this field name one that carries a secret?
+ *
+ * Exported because `redactKeys` is not the only thing that needs the answer: a
+ * caller that wants to **alias** a value rather than replace it — a journal
+ * that must stay legible — needs the same vocabulary, and a second list of
+ * sensitive names is a list that disagrees with this one.
+ */
+export const isSensitiveKey = (
+  key: string,
+  fragments: readonly string[] = SENSITIVE_KEYS,
+): boolean => isSensitive(key, fragments);
+
 const isSensitive = (key: string, fragments: readonly string[]): boolean => {
   // Strip case and separators: `X-Api-Key`, `api_key` and `apiKey` are one key.
   const normalized = key.toLowerCase().replace(/[^a-z0-9]/g, '');

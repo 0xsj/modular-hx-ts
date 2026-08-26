@@ -33,7 +33,7 @@ function visible(record: AuditRecord, scope: Scope): boolean {
       return false;
     case 'own':
       return (
-        record.state.actor === scope.id || record.state.subject === scope.id
+        record.state.actor === scope.actor || record.state.subject === scope.id
       );
   }
 }

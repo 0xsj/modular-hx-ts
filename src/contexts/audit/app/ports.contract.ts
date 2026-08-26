@@ -238,11 +238,17 @@ export function auditLogContract(subject: () => Subject): void {
   });
 
   describe('scope — case 37', () => {
-    const OWN: Scope = { kind: 'own', id: 'user:dave' };
+    // **The two halves are spelled differently, and that is the case.** An
+    // envelope names an actor `user:<id>`; a payload names a subject as a bare
+    // id. This fixture used `id: 'user:dave'` for both, so one value compared
+    // against two columns matched both — and the actor half of the scope had
+    // never been exercised at all. An `orgs` event whose subject is an
+    // organization is what surfaced it.
+    const OWN: Scope = { kind: 'own', id: 'dave', actor: 'user:dave' };
 
     it('shows a caller records where they are the ACTOR', async () => {
       const s = subject();
-      const mine = record({ actor: 'user:dave', subject: 'user:erin' });
+      const mine = record({ actor: 'user:dave', subject: 'erin' });
       await s.log().append(mine);
 
       expect(
@@ -254,7 +260,7 @@ export function auditLogContract(subject: () => Subject): void {
       // The one that matters: being disabled by an administrator is a record
       // where somebody else acted, and it is the record you most want to find.
       const s = subject();
-      const done = record({ actor: 'user:admin', subject: 'user:dave' });
+      const done = record({ actor: 'user:admin', subject: 'dave' });
       await s.log().append(done);
 
       expect(
@@ -264,7 +270,7 @@ export function auditLogContract(subject: () => Subject): void {
 
     it('shows nothing of somebody else`s', async () => {
       const s = subject();
-      const theirs = record({ actor: 'user:erin', subject: 'user:frank' });
+      const theirs = record({ actor: 'user:erin', subject: 'frank' });
       await s.log().append(theirs);
 
       expect(
@@ -277,7 +283,7 @@ export function auditLogContract(subject: () => Subject): void {
       // `actor=somebody-else` must still see nothing — the scope is a separate
       // argument the adapter ANDs in, not a default the query overrides.
       const s = subject();
-      const theirs = record({ actor: 'user:erin', subject: 'user:frank' });
+      const theirs = record({ actor: 'user:erin', subject: 'frank' });
       await s.log().append(theirs);
 
       const found = await s

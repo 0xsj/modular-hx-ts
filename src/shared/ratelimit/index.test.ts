@@ -475,7 +475,7 @@ describe('the 429 goes through the same mapper as every other error', () => {
 
     expect(refused.headers['content-type']).toBe('application/problem+json');
     expect(JSON.parse(refused.body)).toMatchObject({
-      type: '/problems/exhausted',
+      type: '/problems/rate-limited',
       status: 429,
     });
   });
@@ -501,7 +501,7 @@ describe('the 429 goes through the same mapper as every other error', () => {
 
     for (let i = 0; i < 6; i++) await call();
 
-    expect(lines[5]?.['err_kind']).toBe('exhausted');
+    expect(lines[5]?.['err_kind']).toBe('rate-limited');
     expect(lines[5]?.['status']).toBe(429);
   });
 });

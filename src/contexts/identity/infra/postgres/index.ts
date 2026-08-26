@@ -169,6 +169,8 @@ export function postgresUsers(db: DB): Users {
       };
 
       const where: string[] = [];
+      // The directory shows people who can act — see `UserQuery`.
+      if (query.includeDisabled !== true) where.push('enabled');
       if (query.q !== undefined && query.q !== '') {
         const pattern = bind(`%${escapeLike(query.q.toLowerCase())}%`);
         where.push(
@@ -438,6 +440,14 @@ export function postgresChallenges(db: DB): Challenges {
   };
 
   return {
+    byId: (id) =>
+      one(
+        // nolint:tenant — a challenge is reached by an authenticated id
+        `select ${CHALLENGE_COLUMNS} from ${CHALLENGES_TABLE} where id = $1`,
+        [id],
+        'load a challenge',
+      ),
+
     byFingerprint: (fingerprint) =>
       one(
         `select ${CHALLENGE_COLUMNS} from ${CHALLENGES_TABLE}
